@@ -1,0 +1,40 @@
+# =============================================================================
+# Bin Picking Vision 설정 (collect_dataset.py / src.camera 공용) - LUCID Helios2
+# =============================================================================
+# 모든 길이 단위: mm
+
+camera:
+  # 카메라 타입. (lucid_helios | femto_bolt)
+  type: lucid_helios
+
+  # 시리얼 번호. null이면 첫 번째로 발견되는 카메라를 사용한다.
+  serial: null
+
+  # ---- LUCID Helios 전용 옵션 ----
+  # Coord3D_ABCY16: X, Y, Z + Intensity (각 16-bit). 빈 피킹 표준 포맷.
+  pixel_format: Coord3D_ABCY16
+
+  # 노출 시간. 어두우면 길게, 모션블러가 우려되면 짧게.
+  # 옵션: Exp62_5Us / Exp250Us / Exp1000Us
+  exposure_time_selector: Exp250Us
+
+  # 동작 거리 모드. 작업 영역에 맞춰 가장 짧은 것을 선택해야 정밀도가 올라간다.
+  # 옵션 예: Distance1500mm / Distance3000mm / Distance4000mm / Distance5000mm / Distance6000mm
+  operating_mode: Distance1500mm
+
+  # 카메라 발견/캡처 타임아웃 (ms)
+  connect_timeout_ms: 5000
+  capture_timeout_ms: 2000
+  warmup_frames: 3
+
+  valid_z_range_mm: [300.0, 900.0]
+
+  # ---- 다중 프레임 평균화 (선택, 2026-07 추가) ----
+  # 정적 씬(빈피킹 촬영은 대부분 해당) 기준으로 N프레임을 연속 캡처해서
+  # 픽셀별로 합쳐 depth 랜덤 노이즈를 sqrt(num_frames)배 줄인다.
+  # 이 섹션 자체를 지우거나 num_frames: 1로 두면 기존과 완전히 동일하게
+  # 동작한다 (기본값 = 끔).
+  averaging:
+    num_frames: 1        # 5~10 정도부터 체감 효과. 커질수록 촬영 시간도 비례해서 늘어남.
+    method: median        # median(이상치에 강건, 기본) | mean(순수 랜덤노이즈 가정 시 더 매끈)
+    min_valid_ratio: 0.6   # 픽셀이 최종 유효하려면 N프레임 중 최소 이 비율 이상에서 유효해야 함
