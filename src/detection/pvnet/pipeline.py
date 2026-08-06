@@ -27,8 +27,8 @@ def estimate_pose_from_crop(
         model: PVNetHead 인스턴스 (학습된 checkpoint를 로드했거나, 배관
             테스트용이면 미학습 상태여도 코드 자체는 동작함 - 물론 미학습
             상태의 pose는 의미 없음).
-        crop_tensor: (3, H, W) float32 [0,1]. rotation_head_model.py의
-            crop_and_preprocess() 출력을 그대로 재사용할 수 있다.
+        crop_tensor: (3, H, W) float32 [0,1]. crop.py의 crop_and_preprocess()
+            출력을 그대로 재사용할 수 있다.
         keypoints_3d: (K, 3) keypoints.py의 farthest_point_sampling() 출력과
             동일 순서/좌표계여야 한다.
         camera_matrix: (3, 3) intrinsic. crop_and_preprocess()가 원본 이미지를

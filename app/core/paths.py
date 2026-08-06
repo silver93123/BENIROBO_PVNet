@@ -31,6 +31,14 @@ DEFAULT_CAD_DIR = PROJECT_ROOT / "data" / "cad"
 DEFAULT_COLLECT_SCRIPT = DEFAULT_SCRIPTS_DIR / "collect_dataset.py"
 DEFAULT_CAMERA_CONFIG_PATH = PROJECT_ROOT / "configs" / "camera_config.yaml"
 
+# 카메라 타입 -> config yaml 매핑. settings_tab.py(카메라 설정 편집)와
+# live_capture_icp_tab.py(실제 촬영) 둘 다 이 딕셔너리를 그대로 참조한다 -
+# 값이 여기 한 곳에만 있어야 두 파일이 서로 다른 목록을 보여주는 사고가 안 난다.
+CAMERA_CONFIG_PATHS = {
+    "lucid_helios": PROJECT_ROOT / "configs" / "camera_config_helios.yaml",
+    "femto_bolt": PROJECT_ROOT / "configs" / "camera_config_femto.yaml",
+}
+
 
 def resolve_relative_to_project(path_str: str) -> Path:
     """path_str이 상대경로면 PROJECT_ROOT 기준으로, 절대경로면 그대로 반환."""

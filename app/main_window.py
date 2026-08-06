@@ -1,10 +1,23 @@
-"""메인 윈도우: 좌측 트리 네비게이션 + 우측 스택 콘텐츠 + 하단 공용 로그.
+"""메인 윈도우: 좌측 트리 내비게이션 + 우측 스택 콘텐츠 + 하단 공용 로그.
 
 원본 BENIROBO_RTMDetTrain 프로젝트(탭 0~10)에서 PVNet 라벨링에 필요한
-두 탭만 들고 나온 최소 버전이다:
+탭만 들고 나온 최소 버전이다:
 
+    0. 설정           (이 프로젝트에서 새로 추가, settings_tab.py - ICP
+                        파라미터 + RTMDet-Ins 체크포인트/config 경로를
+                        여기서만 편집한다. data/app_settings.json에 저장돼
+                        앱을 재시작해도 유지된다.)
     1. 수동 라벨링    (구 "8. 수동 라벨링", manual_labeling_tab.py)
     2. PVNet 라벨 생성 (구 "10. PVNet 라벨 생성", pvnet_label_generation_tab.py)
+    3. PVNet 학습      (이 프로젝트에서 새로 추가, pvnet_train_tab.py -
+                         scripts/train_pvnet.py를 QProcess로 실행하는 GUI 래퍼)
+
+ICP 기반 탭(1, 2 - 정확히는 이들의 공통 조상인 ICPWorkbenchTab)은 더 이상
+체크포인트/config/ICP 파라미터를 직접 편집하지 않는다. 실행 시점마다
+app/core/settings_manager.load_settings()로 "설정" 탭에 저장된 최신값을
+다시 읽어 쓴다 - 이 탭을 미리 열어두지 않았어도 항상 최신값이 반영된다.
+각 ICP 탭의 "설정 열기" 버튼은 open_settings_requested 시그널을 emit하고,
+이 파일이 그 시그널을 받아 nav_tree에서 설정 탭으로 전환한다.
 
 RotHead/FoundationPose 관련 탭, 데이터 수집/세션 관리, 오프라인 검출
 테스트, RTMDet 학습 파이프라인은 이 프로젝트 범위에서 제외했다 - 필요한
@@ -12,9 +25,9 @@ RotHead/FoundationPose 관련 탭, 데이터 수집/세션 관리, 오프라인 
 그대로 복사해서 재사용한다.
 
 구조는 원본과 동일하게 QTreeWidget(좌측 내비게이션) + QStackedWidget(우측
-콘텐츠) + 하단 공용 로그 콘솔을 유지했다 - 지금은 leaf가 2개뿐이지만,
-나중에 탭이 다시 늘어날 걸 대비해 원본 아키텍처(카테고리 하위 트리 지원,
-_add_leaf() 패턴)를 그대로 가져왔다. 새 탭을 추가할 때는 원본과 동일하게:
+콘텐츠) + 하단 공용 로그 콘솔을 유지했다 - 나중에 탭이 다시 늘어날 걸
+대비해 원본 아키텍처(카테고리 하위 트리 지원, _add_leaf() 패턴)를 그대로
+가져왔다. 새 탭을 추가할 때는 원본과 동일하게:
     1. app/tabs/에 새 파일 작성
     2. 이 파일에 import + 인스턴스 생성 + self._add_leaf(...) 한 줄
     3. 필요하면 log_message 시그널 연결 한 줄
@@ -30,6 +43,8 @@ from PyQt6.QtCore import Qt
 
 from app.tabs.manual_labeling_tab import ManualLabelingTab
 from app.tabs.pvnet_label_generation_tab import PVNetLabelGenerationTab
+from app.tabs.pvnet_train_tab import PVNetTrainTab
+from app.tabs.settings_tab import SettingsTab
 from app.widgets.log_console import LogConsole
 
 # 트리 아이템에 스택 페이지 인덱스를 저장할 때 쓰는 데이터 role.
@@ -85,11 +100,17 @@ class MainWindow(QMainWindow):
         body.addWidget(self.stack, stretch=1)
 
         # ---- 페이지 구성 (탭 인스턴스 생성 + 스택에 추가 + 트리 항목 연결) ----
+        self.settings_tab = SettingsTab()
+        self.settings_nav_item = self._add_leaf("0. 설정", self.settings_tab)
+
         self.manual_labeling_tab = ManualLabelingTab()
         self._add_leaf("1. 수동 라벨링", self.manual_labeling_tab)
 
         self.pvnet_label_gen_tab = PVNetLabelGenerationTab()
         self._add_leaf("2. PVNet 라벨 생성", self.pvnet_label_gen_tab)
+
+        self.pvnet_train_tab = PVNetTrainTab()
+        self._add_leaf("3. PVNet 학습", self.pvnet_train_tab)
 
         self.nav_tree.currentItemChanged.connect(self._on_nav_changed)
 
@@ -97,15 +118,23 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.log_console)
 
         # 로그 시그널 연결
+        self.settings_tab.log_message.connect(self.log_console.append_log)
         self.manual_labeling_tab.log_message.connect(self.log_console.append_log)
         self.pvnet_label_gen_tab.log_message.connect(self.log_console.append_log)
+        self.pvnet_train_tab.log_message.connect(self.log_console.append_log)
+
+        # ICP 기반 탭의 "설정 열기" 버튼 -> 설정 탭으로 전환
+        self.manual_labeling_tab.open_settings_requested.connect(self._on_open_settings)
+        self.pvnet_label_gen_tab.open_settings_requested.connect(self._on_open_settings)
 
         # 첫 화면: 트리의 첫 leaf 항목 선택
         first_leaf = self.nav_tree.topLevelItem(0)
         self.nav_tree.setCurrentItem(first_leaf)
 
-    def _add_leaf(self, label: str, page: QWidget, parent_item: QTreeWidgetItem | None = None) -> None:
-        """스택에 페이지를 추가하고, 그 인덱스를 담은 트리 leaf 항목을 만든다.
+    def _add_leaf(
+        self, label: str, page: QWidget, parent_item: QTreeWidgetItem | None = None
+    ) -> QTreeWidgetItem:
+        """스택에 페이지를 추가하고, 그 인덱스를 담은 트리 leaf 항목을 만들어 반환한다.
 
         나중에 카테고리(하위 트리)가 필요해지면 parent_item에 QTreeWidgetItem을
         넘기면 된다 - 원본 프로젝트의 "2. 모델 학습" 카테고리 트리와 동일한
@@ -118,6 +147,11 @@ class MainWindow(QMainWindow):
             parent_item.addChild(item)
         else:
             self.nav_tree.addTopLevelItem(item)
+        return item
+
+    def _on_open_settings(self) -> None:
+        """ICP 기반 탭의 '설정 열기' 버튼(open_settings_requested)에 연결됨."""
+        self.nav_tree.setCurrentItem(self.settings_nav_item)
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()

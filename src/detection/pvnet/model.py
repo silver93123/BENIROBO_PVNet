@@ -45,9 +45,9 @@ class _ConvBnRelu(nn.Module):
 class PVNetHead(nn.Module):
     """단일 인스턴스 크롭 -> (세그멘테이션 로짓, 키포인트 방향 벡터장).
 
-    입력: (B, 3, H, W) float32, [0, 1] 정규화. rotation_head_model.py의
-        crop_and_preprocess() 출력을 그대로 재사용할 수 있다(mask_background=True
-        권장 - 배경 픽셀이 지워져 있으면 세그멘테이션 학습이 쉬워짐).
+    입력: (B, 3, H, W) float32, [0, 1] 정규화. crop.py의 crop_and_preprocess()
+        출력을 그대로 재사용할 수 있다(mask_background=True 권장 - 배경 픽셀이
+        지워져 있으면 세그멘테이션 학습이 쉬워짐).
 
     출력:
         seg_logits: (B, 2, H, W) - 배경(채널 0)/전경(채널 1) 로짓.

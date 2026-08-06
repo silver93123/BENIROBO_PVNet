@@ -34,25 +34,27 @@ from PyQt6.QtCore import pyqtSignal, Qt, QProcess
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QMessageBox, QLineEdit, QComboBox, QScrollArea, QFrame,
-    QGroupBox, QGridLayout, QDoubleSpinBox, QSpinBox, QCheckBox, QTabWidget,
+    QGroupBox, QTabWidget, QDoubleSpinBox,
 )
 
 from app.core.detector import Detection
-from app.core.config_patcher import find_latest_best_checkpoint
-from app.core.paths import DEFAULT_CONFIG_PATH, DEFAULT_CAD_DIR
+from app.core.camera_intrinsics import estimate_intrinsics_from_organized_pcd, project_points
+from app.core.paths import DEFAULT_CAD_DIR
 from app.core.pipeline_context import FrameContext
 from app.widgets.image_viewer import ImageViewer
-from app.core import icp_runner
+from app.core import icp_runner, settings_manager
 from app.core.icp_runner import ICPResult, ICPParams
-from app.core.registration import AVAILABLE_REGISTRATION_TYPES
 from app.tabs.icp_pipelines import AVAILABLE_ICP_PIPELINES
 
-DEFAULT_SCORE_THRESHOLD = 0.3
 CAD_EXTS = {".stl", ".ply", ".obj"}
+CAD_OVERLAY_MAX_POINTS = 300  # ICP 결과 오버레이용 CAD 서브샘플 점 개수 (속도/시인성용)
 
 
 class ICPWorkbenchTab(QWidget):
     log_message = pyqtSignal(str)
+    #: '설정 열기' 버튼이 눌리면 발생 - main_window.py가 이 시그널을 받아
+    #: nav_tree에서 설정 탭을 선택하도록 연결한다.
+    open_settings_requested = pyqtSignal()
 
     #: 로그 메시지 접두어. 서브클래스가 오버라이드해서 탭을 구분한다
     #: (예: "ICP 탭" vs "ICP(TCP) 탭").
@@ -72,6 +74,8 @@ class ICPWorkbenchTab(QWidget):
         self._pcd_std: np.ndarray | None = None
         self._last_detections: list[Detection] = []
         self._last_icp_results: list[ICPResult] = []
+        self._icp_original_T: dict[int, np.ndarray] = {}
+        self._result_card_widgets: dict[int, dict] = {}
         self._cad_pcd = None
         self._cad_visible_normal = None
         self._cad_visible_flipped = None
@@ -81,7 +85,7 @@ class ICPWorkbenchTab(QWidget):
         self._cad_ref_dist_loaded: float | None = None
         self._viewer_process: QProcess | None = None
         self._build_ui()
-        self._prefill_latest_checkpoint()
+        self._refresh_checkpoint_display()
         self._refresh_cad_list()
 
     # =============================================================
@@ -118,25 +122,20 @@ class ICPWorkbenchTab(QWidget):
 
         left.addWidget(self._build_acquisition_panel())
 
-        left.addWidget(QLabel("체크포인트"))
+        ckpt_group = QGroupBox("RTMDet-Ins (설정 탭에서 관리)")
+        ckpt_layout = QVBoxLayout(ckpt_group)
+        ckpt_layout.addWidget(QLabel("체크포인트"))
         self.checkpoint_edit = QLineEdit()
-        left.addWidget(self.checkpoint_edit)
-        ckpt_btn_row = QHBoxLayout()
-        btn_browse_ckpt = QPushButton("선택")
-        btn_browse_ckpt.clicked.connect(self._on_browse_checkpoint)
-        ckpt_btn_row.addWidget(btn_browse_ckpt)
-        ckpt_btn_row.addStretch(1)
-        left.addLayout(ckpt_btn_row)
-
-        left.addWidget(QLabel("config"))
+        self.checkpoint_edit.setReadOnly(True)
+        ckpt_layout.addWidget(self.checkpoint_edit)
+        ckpt_layout.addWidget(QLabel("config"))
         self.config_edit = QLineEdit()
-        left.addWidget(self.config_edit)
-        cfg_btn_row = QHBoxLayout()
-        btn_browse_cfg = QPushButton("선택")
-        btn_browse_cfg.clicked.connect(self._on_browse_config)
-        cfg_btn_row.addWidget(btn_browse_cfg)
-        cfg_btn_row.addStretch(1)
-        left.addLayout(cfg_btn_row)
+        self.config_edit.setReadOnly(True)
+        ckpt_layout.addWidget(self.config_edit)
+        btn_open_settings_ckpt = QPushButton("설정 열기")
+        btn_open_settings_ckpt.clicked.connect(self.open_settings_requested.emit)
+        ckpt_layout.addWidget(btn_open_settings_ckpt)
+        left.addWidget(ckpt_group)
 
         left.addWidget(QLabel("CAD 모델"))
         cad_row = QHBoxLayout()
@@ -177,9 +176,9 @@ class ICPWorkbenchTab(QWidget):
         from PyQt6.QtWidgets import QSlider
         self.thresh_slider = QSlider(Qt.Orientation.Horizontal)
         self.thresh_slider.setRange(0, 100)
-        self.thresh_slider.setValue(int(DEFAULT_SCORE_THRESHOLD * 100))
+        self.thresh_slider.setValue(int(settings_manager.load_settings()["score_threshold"] * 100))
         self.thresh_slider.setFixedWidth(90)
-        self.thresh_label = QLabel(f"{DEFAULT_SCORE_THRESHOLD:.2f}")
+        self.thresh_label = QLabel(f"{self.thresh_slider.value() / 100:.2f}")
         self.thresh_slider.valueChanged.connect(
             lambda v: self.thresh_label.setText(f"{v / 100:.2f}")
         )
@@ -188,21 +187,25 @@ class ICPWorkbenchTab(QWidget):
         run_row.addStretch(1)
         center.addLayout(run_row)
 
-        params_container = QWidget()
-        params_layout = QVBoxLayout(params_container)
-        params_layout.setContentsMargins(0, 0, 0, 0)
-        self.fgr_box = self._build_fgr_params_box()
-        params_layout.addWidget(self._build_icp_params_box())
-        params_layout.addWidget(self.fgr_box)
-        params_layout.addStretch(1)
+        # ICP/FGR 파라미터는 더 이상 여기서 편집하지 않는다 - "설정" 탭
+        # (settings_tab.py)이 유일한 편집 지점이고, _build_icp_params()가
+        # 실행 시점에 항상 최신 저장값을 다시 읽는다. params_scroll 위젯
+        # 자체는 이름을 유지한다 - manual_labeling_tab.py 등 서브클래스가
+        # self.params_scroll.hide()로 참조하기 때문.
+        params_placeholder = QWidget()
+        params_layout = QVBoxLayout(params_placeholder)
+        params_layout.setContentsMargins(4, 4, 4, 4)
+        params_layout.addWidget(QLabel("ICP/FGR 파라미터는 '설정' 탭에서 관리됩니다."))
+        btn_open_settings_params = QPushButton("설정 열기")
+        btn_open_settings_params.clicked.connect(self.open_settings_requested.emit)
+        params_layout.addWidget(btn_open_settings_params)
 
         params_scroll = QScrollArea()
         params_scroll.setWidgetResizable(True)
-        params_scroll.setWidget(params_container)
+        params_scroll.setWidget(params_placeholder)
         params_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        params_scroll.setMaximumHeight(320)
+        params_scroll.setMaximumHeight(80)
         self.params_scroll = params_scroll
-        params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         center.addWidget(params_scroll)
 
         self.image_viewer = ImageViewer()
@@ -232,235 +235,28 @@ class ICPWorkbenchTab(QWidget):
 
         root.addWidget(right_widget)
 
-    def _build_icp_params_box(self) -> QGroupBox:
-        defaults = ICPParams()
-        box = QGroupBox("ICP 파라미터 (모든 파이프라인 공유)")
-        grid = QGridLayout(box)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(4)
-
-        def add_double(row, col, label, value, minimum, maximum, step, decimals=3):
-            grid.addWidget(QLabel(label), row, col * 2)
-            spin = QDoubleSpinBox()
-            spin.setRange(minimum, maximum)
-            spin.setSingleStep(step)
-            spin.setDecimals(decimals)
-            spin.setValue(value)
-            spin.setFixedWidth(80)
-            grid.addWidget(spin, row, col * 2 + 1)
-            return spin
-
-        def add_int(row, col, label, value, minimum, maximum, step=1):
-            grid.addWidget(QLabel(label), row, col * 2)
-            spin = QSpinBox()
-            spin.setRange(minimum, maximum)
-            spin.setSingleStep(step)
-            spin.setValue(value)
-            spin.setFixedWidth(80)
-            grid.addWidget(spin, row, col * 2 + 1)
-            return spin
-
-        self.spin_mask_erode = add_int(0, 0, "마스크 침식 px", defaults.mask_erode_px, 0, 10)
-        self.spin_cad_ref_dist = add_double(0, 1, "카메라~부품 거리(m)", defaults.cad_hpr_ref_distance_m, 0.05, 5.0, 0.01, 3)
-        erode_hint = QLabel("마스크 침식: depth 경계 노이즈 완충용 (0=끔).\n"
-                             "카메라~부품 거리: CAD 가시면(보이는 면만 정합) 계산 기준값.")
-        erode_hint.setStyleSheet("color: #888; font-size: 10px;")
-        erode_hint.setWordWrap(True)
-        grid.addWidget(erode_hint, 10, 0, 1, 4)
-
-        # 2026-07 추가: 포인트클라우드 업샘플링. 카메라 해상도 자체가 낮아
-        # 인스턴스당 포인트가 부족할 때, 마스크 bbox 영역만 격자 보간으로
-        # 밀도를 높여서 ICP 대응점을 늘린다 (extract_instance_points_mm 참고).
-        self.spin_pc_upsample = add_int(13, 0, "PC 업샘플링 배수", defaults.pc_upsample_factor, 1, 8)
-        grid.addWidget(QLabel("업샘플 방식"), 13, 2)
-        self.combo_pc_upsample_method = QComboBox()
-        self.combo_pc_upsample_method.addItems(["linear", "cubic", "probabilistic"])
-        idx = self.combo_pc_upsample_method.findText(defaults.pc_upsample_method)
-        self.combo_pc_upsample_method.setCurrentIndex(max(0, idx))
-        self.combo_pc_upsample_method.setFixedWidth(90)
-        grid.addWidget(self.combo_pc_upsample_method, 13, 3)
-        upsample_hint = QLabel("1=끔(기존과 동일). linear/cubic은 격자 보간(매끈한 중간값 생성).\n"
-                                "probabilistic은 다중 프레임 촬영(탭5, averaging)의 픽셀별 표준편차에서\n"
-                                "Monte Carlo 재샘플링 - 표준편차 정보 없는 프레임(세션 로드 등)에선\n"
-                                "자동으로 원본 추출로 폴백됨(개수 안 늘어남). cubic은 경계에서\n"
-                                "오버슈트 위험 있어 마스크 침식 px를 같이 늘리는 걸 권장.")
-        upsample_hint.setStyleSheet("color: #888; font-size: 10px;")
-        upsample_hint.setWordWrap(True)
-        grid.addWidget(upsample_hint, 14, 0, 1, 4)
-
-        self.spin_outlier_n = add_int(1, 0, "outlier n", defaults.outlier_nb_neighbors, 1, 200)
-        self.spin_outlier_std = add_double(1, 1, "outlier σ", defaults.outlier_std_ratio, 0.1, 10.0, 0.1, 2)
-
-        self.spin_fitness = add_double(2, 0, "fitness ≥", defaults.fitness_threshold, 0.0, 1.0, 0.01, 2)
-        self.spin_xyz_max = add_double(2, 1, "XYZ max (m)", defaults.xyz_max_m, 0.1, 10.0, 0.1, 2)
-
-        self.spin_roll_limit = add_double(3, 0, "roll ± deg", defaults.roll_limit_deg, 0.0, 180.0, 1.0, 1)
-        self.spin_pitch_limit = add_double(3, 1, "pitch ± deg", defaults.pitch_limit_deg, 0.0, 180.0, 1.0, 1)
-        self.spin_yaw_limit = add_double(4, 0, "yaw ± deg", defaults.yaw_limit_deg, 0.0, 180.0, 1.0, 1)
-
-        self.spin_init_roll = add_double(5, 0, "초기 roll deg", defaults.init_roll_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_init_pitch = add_double(5, 1, "초기 pitch deg", defaults.init_pitch_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_init_yaw = add_double(6, 0, "초기 yaw deg", defaults.init_yaw_deg, -180.0, 180.0, 1.0, 1)
-
-        self.spin_axis_roll = add_double(7, 0, "CAD 축보정 roll", defaults.cad_axis_roll_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_axis_pitch = add_double(7, 1, "CAD 축보정 pitch", defaults.cad_axis_pitch_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_axis_yaw = add_double(8, 0, "CAD 축보정 yaw", defaults.cad_axis_yaw_deg, -180.0, 180.0, 1.0, 1)
-        axis_hint = QLabel("ICP는 회전 없이 중심만 맞추고 시작합니다 - CAD가 실제 물체 방향과\n안 맞으면 여기부터 조정하세요 (CAD 바뀔 때마다 다시 맞춰야 함).")
-        axis_hint.setStyleSheet("color: #888; font-size: 10px;")
-        axis_hint.setWordWrap(True)
-        grid.addWidget(axis_hint, 9, 0, 1, 4)
-
-        btn_reset = QPushButton("기본값으로")
-        btn_reset.clicked.connect(lambda: self._reset_icp_params(defaults))
-        grid.addWidget(btn_reset, 8, 2, 1, 2)
-
-        grid.addWidget(QLabel("정합 알고리즘 (fallback)"), 11, 0)
-        self.combo_registration_type = QComboBox()
-        self.combo_registration_type.addItems(AVAILABLE_REGISTRATION_TYPES)
-        default_idx = self.combo_registration_type.findText(defaults.registration_type)
-        self.combo_registration_type.setCurrentIndex(max(0, default_idx))
-        grid.addWidget(self.combo_registration_type, 11, 1)
-        self.combo_registration_type.currentTextChanged.connect(self._on_registration_type_changed)
-        algo_hint = QLabel("파이프라인 탭이 initial pose를 직접 못 내는 경우 여기로 fallback합니다.\n"
-                            "알고리즘별 세부 파라미터는 아래(open3d_multistage는 이 박스,\n"
-                            "fgr_global은 바로 아래 'FGR 파라미터' 박스)에서 조정합니다.")
-        algo_hint.setStyleSheet("color: #888; font-size: 10px;")
-        algo_hint.setWordWrap(True)
-        grid.addWidget(algo_hint, 12, 0, 1, 4)
-
-        return box
-
-    def _on_registration_type_changed(self, algo_type: str) -> None:
-        self.fgr_box.setVisible(algo_type == "fgr_global")
-
-    def _build_fgr_params_box(self) -> QGroupBox:
-        defaults = ICPParams()
-        box = QGroupBox("FGR 파라미터 (registration_type=fgr_global)")
-        grid = QGridLayout(box)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(4)
-
-        def add_double(row, col, label, value, minimum, maximum, step, decimals=4):
-            grid.addWidget(QLabel(label), row, col * 2)
-            spin = QDoubleSpinBox()
-            spin.setRange(minimum, maximum)
-            spin.setSingleStep(step)
-            spin.setDecimals(decimals)
-            spin.setValue(value)
-            spin.setFixedWidth(90)
-            grid.addWidget(spin, row, col * 2 + 1)
-            return spin
-
-        self.spin_fgr_voxel = add_double(0, 0, "voxel size (m)", defaults.fgr_voxel_size_m, 0.0005, 0.05, 0.0005, 4)
-        self.spin_fgr_normal_factor = add_double(0, 1, "normal 반경 배수", defaults.fgr_normal_radius_factor, 0.5, 10.0, 0.5, 2)
-        self.spin_fgr_fpfh_factor = add_double(1, 0, "FPFH 반경 배수", defaults.fgr_fpfh_radius_factor, 1.0, 20.0, 0.5, 2)
-        self.spin_fgr_dist_factor = add_double(1, 1, "대응거리 배수", defaults.fgr_distance_threshold_factor, 0.5, 10.0, 0.5, 2)
-
-        self.check_fgr_refine = QCheckBox("ICP로 정밀화 (refine_with_icp)")
-        self.check_fgr_refine.setChecked(defaults.fgr_refine_with_icp)
-        grid.addWidget(self.check_fgr_refine, 2, 0, 1, 2)
-        self.spin_fgr_refine_dist = add_double(3, 0, "정밀화 max_dist (m)", defaults.fgr_refine_max_dist_m, 0.0005, 0.02, 0.0005, 4)
-
-        self.check_fgr_rotation_prior = QCheckBox("회전 prior 검증 (use_rotation_prior)")
-        self.check_fgr_rotation_prior.setChecked(defaults.fgr_use_rotation_prior)
-        grid.addWidget(self.check_fgr_rotation_prior, 4, 0, 1, 2)
-        self.spin_fgr_max_dev = add_double(5, 0, "최대 허용 편차 (deg)", defaults.fgr_max_rotation_deviation_deg, 0.0, 180.0, 5.0, 1)
-
-        hint = QLabel("voxel size: 부품 크기에 맞춰 조정 (작은 부품은 3mm 이하 권장).\n"
-                      "대응거리 배수: 이 값 * voxel size가 FGR이 대응점으로 인정하는 최대 거리.\n"
-                      "회전 prior 검증: 결과 회전이 '초기 roll/pitch/yaw'와 너무 다르면\n"
-                      "대칭/반복 형상 오탐으로 보고 초기값 기반 ICP로 대체합니다.")
-        hint.setStyleSheet("color: #888; font-size: 10px;")
-        hint.setWordWrap(True)
-        grid.addWidget(hint, 6, 0, 1, 4)
-
-        box.setVisible(defaults.registration_type == "fgr_global")
-        return box
-
-    def _reset_icp_params(self, defaults: ICPParams) -> None:
-        self.spin_mask_erode.setValue(defaults.mask_erode_px)
-        self.spin_cad_ref_dist.setValue(defaults.cad_hpr_ref_distance_m)
-        self.spin_pc_upsample.setValue(defaults.pc_upsample_factor)
-        idx = self.combo_pc_upsample_method.findText(defaults.pc_upsample_method)
-        self.combo_pc_upsample_method.setCurrentIndex(max(0, idx))
-        self.spin_outlier_n.setValue(defaults.outlier_nb_neighbors)
-        self.spin_outlier_std.setValue(defaults.outlier_std_ratio)
-        self.spin_fitness.setValue(defaults.fitness_threshold)
-        self.spin_xyz_max.setValue(defaults.xyz_max_m)
-        self.spin_roll_limit.setValue(defaults.roll_limit_deg)
-        self.spin_pitch_limit.setValue(defaults.pitch_limit_deg)
-        self.spin_yaw_limit.setValue(defaults.yaw_limit_deg)
-        self.spin_init_roll.setValue(defaults.init_roll_deg)
-        self.spin_init_pitch.setValue(defaults.init_pitch_deg)
-        self.spin_init_yaw.setValue(defaults.init_yaw_deg)
-        self.spin_axis_roll.setValue(defaults.cad_axis_roll_deg)
-        self.spin_axis_pitch.setValue(defaults.cad_axis_pitch_deg)
-        self.spin_axis_yaw.setValue(defaults.cad_axis_yaw_deg)
-        idx = self.combo_registration_type.findText(defaults.registration_type)
-        self.combo_registration_type.setCurrentIndex(max(0, idx))
-        self.spin_fgr_voxel.setValue(defaults.fgr_voxel_size_m)
-        self.spin_fgr_normal_factor.setValue(defaults.fgr_normal_radius_factor)
-        self.spin_fgr_fpfh_factor.setValue(defaults.fgr_fpfh_radius_factor)
-        self.spin_fgr_dist_factor.setValue(defaults.fgr_distance_threshold_factor)
-        self.check_fgr_refine.setChecked(defaults.fgr_refine_with_icp)
-        self.spin_fgr_refine_dist.setValue(defaults.fgr_refine_max_dist_m)
-        self.check_fgr_rotation_prior.setChecked(defaults.fgr_use_rotation_prior)
-        self.spin_fgr_max_dev.setValue(defaults.fgr_max_rotation_deviation_deg)
-
+    # ------------------------------------------------------ ICP 파라미터
     def _build_icp_params(self) -> ICPParams:
-        return ICPParams(
-            mask_erode_px=self.spin_mask_erode.value(),
-            cad_hpr_ref_distance_m=self.spin_cad_ref_dist.value(),
-            pc_upsample_factor=self.spin_pc_upsample.value(),
-            pc_upsample_method=self.combo_pc_upsample_method.currentText(),
-            outlier_nb_neighbors=self.spin_outlier_n.value(),
-            outlier_std_ratio=self.spin_outlier_std.value(),
-            fitness_threshold=self.spin_fitness.value(),
-            xyz_max_m=self.spin_xyz_max.value(),
-            cad_axis_roll_deg=self.spin_axis_roll.value(),
-            cad_axis_pitch_deg=self.spin_axis_pitch.value(),
-            cad_axis_yaw_deg=self.spin_axis_yaw.value(),
-            init_roll_deg=self.spin_init_roll.value(),
-            init_pitch_deg=self.spin_init_pitch.value(),
-            init_yaw_deg=self.spin_init_yaw.value(),
-            roll_limit_deg=self.spin_roll_limit.value(),
-            pitch_limit_deg=self.spin_pitch_limit.value(),
-            yaw_limit_deg=self.spin_yaw_limit.value(),
-            registration_type=self.combo_registration_type.currentText(),
-            fgr_voxel_size_m=self.spin_fgr_voxel.value(),
-            fgr_normal_radius_factor=self.spin_fgr_normal_factor.value(),
-            fgr_fpfh_radius_factor=self.spin_fgr_fpfh_factor.value(),
-            fgr_distance_threshold_factor=self.spin_fgr_dist_factor.value(),
-            fgr_refine_with_icp=self.check_fgr_refine.isChecked(),
-            fgr_refine_max_dist_m=self.spin_fgr_refine_dist.value(),
-            fgr_use_rotation_prior=self.check_fgr_rotation_prior.isChecked(),
-            fgr_max_rotation_deviation_deg=self.spin_fgr_max_dev.value(),
-        )
+        """실행 시점마다 항상 최신 저장 설정을 다시 읽는다 - 이 탭 인스턴스가
+        먼저 만들어진 뒤 사용자가 '설정' 탭에서 값을 바꿨어도(혹은 다른
+        프로세스가 재시작 사이 파일을 바꿨어도) 항상 최신값을 쓴다."""
+        settings = settings_manager.load_settings()
+        return ICPParams(**settings_manager.icp_params_kwargs(settings))
 
     # ------------------------------------------------------ 체크포인트
-    def _prefill_latest_checkpoint(self) -> None:
-        if not DEFAULT_CONFIG_PATH.is_file():
-            return
-        cfg_path = str(DEFAULT_CONFIG_PATH)
-        self.config_edit.setText(cfg_path)
-        self.config_edit.setToolTip(cfg_path)
-        best = find_latest_best_checkpoint(cfg_path)
-        if best:
-            self.checkpoint_edit.setText(best)
-            self.checkpoint_edit.setToolTip(best)
-            self.log_message.emit(f"[{self.LOG_PREFIX}] 최신 best 체크포인트 자동 설정: {best}")
+    def _refresh_checkpoint_display(self) -> None:
+        """'설정' 탭에 저장된 체크포인트/config 경로를 읽어 읽기전용 필드에 반영."""
+        settings = settings_manager.load_settings()
+        self.checkpoint_edit.setText(settings["checkpoint_path"])
+        self.checkpoint_edit.setToolTip(settings["checkpoint_path"])
+        self.config_edit.setText(settings["config_path"])
+        self.config_edit.setToolTip(settings["config_path"])
 
-    def _on_browse_checkpoint(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "체크포인트 선택", "", "PyTorch (*.pth)")
-        if path:
-            self.checkpoint_edit.setText(path)
-            self.checkpoint_edit.setToolTip(path)
-
-    def _on_browse_config(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "config 파일 선택", "", "Python (*.py)")
-        if path:
-            self.config_edit.setText(path)
-            self.config_edit.setToolTip(path)
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override 관례
+        super().showEvent(event)
+        # 탭이 화면에 보일 때마다 갱신 - '설정' 탭에서 방금 저장하고 이
+        # 탭으로 돌아왔을 때 읽기전용 필드가 바로 최신값을 보여주게 한다.
+        self._refresh_checkpoint_display()
 
     # ------------------------------------------------------------ CAD
     def _refresh_cad_list(self) -> None:
@@ -491,6 +287,10 @@ class ICPWorkbenchTab(QWidget):
 
     # ------------------------------------------------------ FrameContext
     def _build_context(self, cad_loaded: bool) -> FrameContext:
+        # 표시용 self.checkpoint_edit/config_edit(읽기전용)가 아니라 설정
+        # 파일을 직접 다시 읽는다 - showEvent가 아직 안 붙었을 수도 있는
+        # 상황(예: 탭 전환 없이 바로 실행)에서도 항상 최신값을 보장하기 위함.
+        settings = settings_manager.load_settings()
         return FrameContext(
             session_path=self._session_path or "",
             frame_name=self._current_frame or "",
@@ -501,8 +301,8 @@ class ICPWorkbenchTab(QWidget):
             cad_pcd=self._cad_pcd if cad_loaded else None,
             cad_visible_normal=self._cad_visible_normal if cad_loaded else None,
             cad_visible_flipped=self._cad_visible_flipped if cad_loaded else None,
-            checkpoint_path=self.checkpoint_edit.text().strip(),
-            config_path=self.config_edit.text().strip(),
+            checkpoint_path=settings["checkpoint_path"],
+            config_path=settings["config_path"],
             score_threshold=self.thresh_slider.value() / 100.0,
         )
 
@@ -511,8 +311,12 @@ class ICPWorkbenchTab(QWidget):
         if not self._current_image_path:
             QMessageBox.warning(self, "알림", "먼저 프레임을 준비하세요.")
             return
-        if not self.checkpoint_edit.text().strip() or not self.config_edit.text().strip():
-            QMessageBox.warning(self, "알림", "체크포인트와 config를 모두 지정하세요.")
+        settings = settings_manager.load_settings()
+        if not settings["checkpoint_path"] or not settings["config_path"]:
+            QMessageBox.warning(
+                self, "알림",
+                "체크포인트와 config가 아직 지정되지 않았습니다. '설정' 탭에서 지정하고 저장하세요.",
+            )
             return
 
         active_tab = self.pipeline_tabs.currentWidget()
@@ -536,6 +340,7 @@ class ICPWorkbenchTab(QWidget):
 
         self._last_detections = detections
         self.image_viewer.set_detections(self._last_detections)
+        self.image_viewer.clear_pose_overlays()
         self._last_icp_results = []
         self._clear_result_panel()
         self.btn_open_viewer.setEnabled(False)
@@ -594,6 +399,7 @@ class ICPWorkbenchTab(QWidget):
 
         self._last_icp_results = results
         self._render_result_panel(results)
+        self._update_cad_overlay(results)
         # 2026-07 변경: 실패한 인스턴스도 이제 뷰어에 별도 색으로 표시되므로
         # (build_scene_components의 Failed ICP Instances 레이어), 성공 여부와
         # 무관하게 결과가 하나라도 있으면 뷰어를 열 수 있게 한다.
@@ -601,6 +407,38 @@ class ICPWorkbenchTab(QWidget):
 
         n_ok = sum(r.ok for r in results)
         self.log_message.emit(f"[{self.LOG_PREFIX}] {active_tab.pipeline_name} ICP 완료: 성공 {n_ok}/{len(results)}")
+
+    def _update_cad_overlay(self, results: list[ICPResult]) -> None:
+        """ICP 정합이 낸 pose(4x4)로 CAD 점군을 이미지에 투영해서 반투명
+        오버레이로 보여준다. manual_labeling_tab.py가 수동 각도 입력 시
+        실시간 미리보기에 쓰는 것과 동일한 ImageViewer.set_pose_overlay()
+        메커니즘을 재사용한다 - "정합이 실제로 잘 맞았는지"를 눈으로 바로
+        확인할 수 있다.
+
+        정합에 성공한 인스턴스만 그린다(실패는 pose 자체가 신뢰할 수 없으므로
+        오버레이도 안 그리는 게 맞음). 카메라 intrinsic을 추정할 수 없거나
+        (유효 픽셀 없음) CAD가 아직 로드되지 않았으면 조용히 건너뛴다.
+        """
+        self.image_viewer.clear_pose_overlays()
+        if self._cad_pcd is None or self._pcd_organized is None or self._valid_mask is None:
+            return
+        try:
+            intrinsics = estimate_intrinsics_from_organized_pcd(self._pcd_organized, self._valid_mask)
+        except ValueError:
+            return
+
+        cad_points_m = np.asarray(self._cad_pcd.points)
+        if cad_points_m.shape[0] > CAD_OVERLAY_MAX_POINTS:
+            idx = np.random.default_rng(0).choice(cad_points_m.shape[0], size=CAD_OVERLAY_MAX_POINTS, replace=False)
+            cad_points_m = cad_points_m[idx]
+
+        for i, result in enumerate(results):
+            if not result.ok or result.T is None:
+                continue
+            R, t_m = result.T[:3, :3], result.T[:3, 3]
+            points_cam_mm = (R @ cad_points_m.T).T * 1000.0 + t_m * 1000.0
+            points_2d = project_points(points_cam_mm, intrinsics)
+            self.image_viewer.set_pose_overlay(i, points_2d)
 
     def _ensure_cad_loaded(self, cad_path: str, params: ICPParams) -> None:
         axis = params.cad_axis_correction_deg
@@ -645,9 +483,18 @@ class ICPWorkbenchTab(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._icp_original_T = {}
+        self._result_card_widgets = {}
 
     def _render_result_panel(self, results: list[ICPResult]) -> None:
         self._clear_result_panel()
+        # 미세조정 델타는 항상 "이번 ICP 실행 직후"의 원본 pose 기준으로
+        # 다시 계산한다 (스핀박스 값을 누적 곱하지 않음) - 그래야 여러 번
+        # 만지작거려도 부동소수점 오차가 안 쌓이고, [리셋]도 스핀박스를
+        # 0으로 되돌리기만 하면 정확히 원래 값으로 복귀한다.
+        self._icp_original_T = {r.instance_id: r.T.copy() for r in results if r.ok and r.T is not None}
+        self._result_card_widgets = {}
+
         for r in results:
             card = QFrame()
             card.setFrameShape(QFrame.Shape.StyledPanel)
@@ -667,14 +514,18 @@ class ICPWorkbenchTab(QWidget):
                 status = QLabel(f"fitness {r.fitness:.3f}")
                 status.setStyleSheet("color: #2a8a2a;")
                 layout.addWidget(status)
-                layout.addWidget(QLabel(f"pick X{pos[0]:+.1f} Y{pos[1]:+.1f} Z{pos[2]:+.1f} mm"))
-                layout.addWidget(QLabel(
+                pos_label = QLabel(f"pick X{pos[0]:+.1f} Y{pos[1]:+.1f} Z{pos[2]:+.1f} mm")
+                layout.addWidget(pos_label)
+                rot_label = QLabel(
                     f"R{pose['roll_deg']:+.1f} P{pose['pitch_deg']:+.1f} Y{pose['yaw_deg']:+.1f} deg"
-                ))
+                )
+                layout.addWidget(rot_label)
                 if r.was_flipped:
                     flip_label = QLabel("뒤집힘 보정됨")
                     flip_label.setStyleSheet("color: #888; font-size: 10px;")
                     layout.addWidget(flip_label)
+
+                layout.addWidget(self._build_rotation_tune_row(r.instance_id, pos_label, rot_label))
             else:
                 status = QLabel(r.error or "실패")
                 status.setStyleSheet("color: #c0392b;")
@@ -684,6 +535,111 @@ class ICPWorkbenchTab(QWidget):
                     layout.addWidget(QLabel(f"fitness {r.fitness:.3f}"))
 
             self.result_layout.insertWidget(self.result_layout.count() - 1, card)
+
+    def _build_rotation_tune_row(self, instance_id: int, pos_label: QLabel, rot_label: QLabel) -> QWidget:
+        """ICP 결과가 살짝 틀어졌을 때 눈으로 보면서 미세조정하는 컨트롤.
+
+        Δroll/Δpitch/Δyaw(deg)는 항상 "이 ICP 결과 원본" 기준 델타이고,
+        카메라(씬) 좌표계에서 회전을 덧씌운다(R_new = R_delta @ R_icp) -
+        물체 자신의 로컬 축이 아니라 화면에서 보이는 대로 X/Y/Z 축을
+        돌리는 감각에 가깝다. 위치(pick point)는 건드리지 않는다 -
+        회전만 미세조정한다는 요청 그대로.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.addWidget(QLabel("회전 미세조정 (Δdeg)"))
+
+        row = QHBoxLayout()
+        spins = {}
+        for axis_label, key in (("R", "droll"), ("P", "dpitch"), ("Y", "dyaw")):
+            row.addWidget(QLabel(axis_label))
+            spin = QDoubleSpinBox()
+            spin.setRange(-90.0, 90.0)
+            spin.setSingleStep(0.5)
+            spin.setDecimals(1)
+            spin.setFixedWidth(60)
+            row.addWidget(spin)
+            spins[key] = spin
+        layout.addLayout(row)
+
+        btn_reset = QPushButton("리셋")
+        btn_reset.setToolTip("이 인스턴스의 ICP 원본 pose로 되돌립니다.")
+        layout.addWidget(btn_reset)
+
+        def on_delta_changed(_value=None):
+            self._apply_rotation_delta(
+                instance_id, spins["droll"].value(), spins["dpitch"].value(), spins["dyaw"].value(),
+                pos_label, rot_label,
+            )
+
+        for spin in spins.values():
+            spin.valueChanged.connect(on_delta_changed)
+
+        def on_reset():
+            for spin in spins.values():
+                spin.blockSignals(True)
+                spin.setValue(0.0)
+                spin.blockSignals(False)
+            on_delta_changed()
+
+        btn_reset.clicked.connect(on_reset)
+
+        self._result_card_widgets[instance_id] = {
+            "pos_label": pos_label, "rot_label": rot_label, "spins": spins,
+        }
+        return widget
+
+    def _apply_rotation_delta(
+        self, instance_id: int, droll: float, dpitch: float, dyaw: float,
+        pos_label: QLabel, rot_label: QLabel,
+    ) -> None:
+        """Δroll/Δpitch/Δyaw를 화면에 찍힌 R/P/Y 숫자에 직접 더한다.
+
+        이전 버전은 카메라 좌표계에서 R_delta @ R_원본으로 회전을 "합성"했는데,
+        3D 회전 합성은 교환법칙이 성립하지 않아서(비가환) - 특히 원본 회전이
+        이미 항등행렬에서 많이 벗어나 있으면(예: roll이 -75도처럼 큰 값) -
+        R만 건드려도 재분해된 P/Y 표시값까지 같이 바뀌어버린다. 이건 수학적으로는
+        틀린 게 아니지만, "R 슬라이더는 R만 바꾼다"는 직관과 안 맞아 혼란스럽다.
+
+        그래서 여기서는 manual_labeling_tab.py가 각도 입력에서 pose를 만드는
+        방식(R = Rz(yaw) @ Ry(pitch) @ Rx(roll))과 동일하게, 원본을
+        roll/pitch/yaw로 분해한 뒤 델타를 각 성분에 독립적으로 더하고 그
+        값으로 새 회전행렬을 처음부터 다시 만든다 - 이러면 Δroll은 R
+        표시값에만, Δpitch는 P에만, Δyaw는 Y에만 정확히 반영된다.
+        """
+        from app.core.icp_runner import _Rx, _Ry, _Rz  # 언더스코어 접두 - 이 파일 밖 재사용 관례(manual_labeling_tab.py)와 동일
+
+        T_original = self._icp_original_T.get(instance_id)
+        if T_original is None:
+            return
+
+        orig_euler = icp_runner.transform_to_pose(T_original)["euler_deg"]
+        new_roll = orig_euler["roll_deg"] + droll
+        new_pitch = orig_euler["pitch_deg"] + dpitch
+        new_yaw = orig_euler["yaw_deg"] + dyaw
+
+        R_new = _Rz(new_yaw) @ _Ry(new_pitch) @ _Rx(new_roll)
+        T_new = T_original.copy()
+        T_new[:3, :3] = R_new
+        # 위치(translation)는 원본 그대로 유지 - 회전만 미세조정.
+
+        target = next((r for r in self._last_icp_results if r.instance_id == instance_id), None)
+        if target is None:
+            return
+        target.T = T_new
+        target.pose = icp_runner.transform_to_pose(T_new)
+
+        if self._cad_pcd is not None:
+            cad_center_m = np.asarray(self._cad_pcd.get_center())
+            target.pick_point_mm = ((T_new[:3, :3] @ cad_center_m + T_new[:3, 3]) * 1000.0).tolist()
+
+        pose = target.pose["euler_deg"]
+        pos = target.pick_point_mm
+        pos_label.setText(f"pick X{pos[0]:+.1f} Y{pos[1]:+.1f} Z{pos[2]:+.1f} mm")
+        rot_label.setText(f"R{pose['roll_deg']:+.1f} P{pose['pitch_deg']:+.1f} Y{pose['yaw_deg']:+.1f} deg")
+
+        self._update_cad_overlay(self._last_icp_results)
 
     # -------------------------------------------------------------- 3D 뷰어
     def _on_open_viewer(self) -> None:

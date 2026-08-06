@@ -30,6 +30,7 @@ requirements.txt에 없다면 `pip install scipy`로 설치할 것.
     >>> # ... fg_pixels, vertex_field로 후처리 (pipeline.py 참고) ...
     >>> votes = vote_keypoints(fg_pixels, vertex_field, num_keypoints=9)
 """
+from .crop import DEFAULT_BBOX_PADDING, DEFAULT_CROP_SIZE, CropTransform, crop_and_preprocess
 from .keypoints import farthest_point_sampling
 from .model import PVNetHead, segmentation_loss, vertex_smooth_l1_loss
 from .pipeline import estimate_pose_from_crop
@@ -48,4 +49,8 @@ __all__ = [
     "canonicalize_axial_rotation",
     "KeypointVote",
     "vote_keypoints",
+    "crop_and_preprocess",
+    "CropTransform",
+    "DEFAULT_CROP_SIZE",
+    "DEFAULT_BBOX_PADDING",
 ]

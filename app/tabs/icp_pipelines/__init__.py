@@ -13,17 +13,17 @@ app/core/registration, src/detection과 동일한 팩토리 패턴이지만, 여
 from __future__ import annotations
 
 from app.tabs.icp_pipelines.base import ICPPipelineTab
-from app.tabs.icp_pipelines.foundationpose_pipeline_tab import FoundationPosePipelineTab
-from app.tabs.icp_pipelines.rothead_pipeline_tab import RotHeadPipelineTab
 from app.tabs.icp_pipelines.rtmdet_pipeline_tab import RTMDetPipelineTab
 
+# 주의: 원본 BENIROBO_RTMDetTrain에는 RotHead/FoundationPose 파이프라인 탭도
+# 있었지만, 이 프로젝트(PVNet 라벨링 전용 축소판)는 RTMDet-Ins 검출만 필요해
+# 그 두 파일은 가져오지 않았다. 새 파이프라인이 필요해지면 base.py를 상속하는
+# 파일을 만들고 여기 목록에 추가하면 된다 (icp_pipelines/__init__.py 상단
+# docstring 참고).
 AVAILABLE_ICP_PIPELINES = [
     ("RTMDet", RTMDetPipelineTab),
-    ("RotHead", RotHeadPipelineTab),
-    ("FoundationPose", FoundationPosePipelineTab),
 ]
 
 __all__ = [
-    "ICPPipelineTab", "RTMDetPipelineTab", "RotHeadPipelineTab",
-    "FoundationPosePipelineTab", "AVAILABLE_ICP_PIPELINES",
+    "ICPPipelineTab", "RTMDetPipelineTab", "AVAILABLE_ICP_PIPELINES",
 ]
