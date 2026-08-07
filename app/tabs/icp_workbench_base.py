@@ -34,7 +34,7 @@ from PyQt6.QtCore import pyqtSignal, Qt, QProcess
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QMessageBox, QLineEdit, QComboBox, QScrollArea, QFrame,
-    QGroupBox, QTabWidget, QDoubleSpinBox,
+    QGroupBox, QTabWidget, QDoubleSpinBox, QCheckBox,
 )
 
 from app.core.detector import Detection
@@ -209,6 +209,17 @@ class ICPWorkbenchTab(QWidget):
         center.addWidget(params_scroll)
 
         self.image_viewer = ImageViewer()
+        gizmo_toggle_row = QHBoxLayout()
+        gizmo_toggle_row.addStretch(1)
+        self.check_show_axis_gizmo = QCheckBox("좌표축 표시")
+        self.check_show_axis_gizmo.setChecked(True)
+        self.check_show_axis_gizmo.setToolTip(
+            "이미지 우측 상단에 Roll/Pitch/Yaw이 어느 축인지 보여주는 작은 범례.\n"
+            "검출 박스와 겹치면 여기서 끌 수 있습니다."
+        )
+        self.check_show_axis_gizmo.toggled.connect(self.image_viewer.set_axis_gizmo_visible)
+        gizmo_toggle_row.addWidget(self.check_show_axis_gizmo)
+        center.addLayout(gizmo_toggle_row)
         center.addWidget(self.image_viewer, stretch=1)
         root.addLayout(center, stretch=2)
 

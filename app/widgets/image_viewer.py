@@ -1,9 +1,11 @@
 """이미지 위에 검출 박스 + 마스크 오버레이 + (선택) pose 미리보기 오버레이를 보여주는 위젯."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
-from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QImage
+from PyQt6.QtCore import Qt, QRectF, QPointF
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QImage, QPolygonF
 from PyQt6.QtWidgets import QLabel, QSizePolicy
 
 from app.core.detector import Detection
@@ -25,7 +27,12 @@ class ImageViewer(QLabel):
         self._base_pixmap: QPixmap | None = None
         self._detections: list[Detection] = []
         self._pose_overlays: dict[int, np.ndarray] = {}  # obj index -> (N,2) 투영된 2D 점
+        self._show_axis_gizmo = True
         self.setText("이미지를 불러오세요")
+
+    def set_axis_gizmo_visible(self, visible: bool) -> None:
+        self._show_axis_gizmo = visible
+        self._refresh()
 
     def load_image(self, path: str) -> None:
         self._base_pixmap = QPixmap(path)
@@ -109,7 +116,120 @@ class ImageViewer(QLabel):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+
+        if self._show_axis_gizmo:
+            gizmo_painter = QPainter(scaled)
+            gizmo_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self._draw_axis_gizmo(gizmo_painter, scaled.width(), scaled.height())
+            gizmo_painter.end()
+
         self.setPixmap(scaled)
+
+    def _draw_axis_gizmo(self, painter: QPainter, canvas_width: int, canvas_height: int) -> None:
+        """카메라(씬) 좌표축과 roll/pitch/yaw 대응관계를 이미지 우측 상단에
+        항상 작게 표시한다 - "Δroll을 올리면 정확히 어느 방향으로 도는지"가
+        항상 헷갈린다는 피드백에 대응. 스케일링이 끝난 최종 픽스맵 위에
+        그려서, 이미지 해상도나 확대/축소와 무관하게 화면에서 항상 같은
+        크기로 보인다 (이미지 좌표계에 그리면 이미지가 클수록 아이콘도
+        커져버림).
+
+        이 앱의 회전 컨벤션(icp_runner._Rx/_Ry/_Rz, R = Rz(yaw)@Ry(pitch)@Rx(roll),
+        카메라 좌표계는 X=오른쪽·Y=아래·Z=깊이) 기준:
+            Roll  = X축 회전 (오른쪽 방향 화살표)
+            Pitch = Y축 회전 (아래쪽 방향 화살표)
+            Yaw   = Z축 회전 (카메라를 정면으로 바라보는 축이라 유일하게
+                    2D 이미지 평면 위 회전으로 정확히 나타낼 수 있음)
+        Yaw만 정확한 회전방향 원호(시계방향)를 같이 그렸다 - _Rz(+d)가
+        +X를 +Y(아래) 쪽으로 돌리므로 이미지에서 양의 yaw는 시계방향이라는
+        걸 직접 계산해서 검증한 뒤 반영한 값이다. Roll/Pitch는 화면 안쪽으로
+        파고드는 회전이라 2D 평면 위에 왜곡 없이 그릴 수 없어 축 방향
+        화살표까지만 표시한다.
+        """
+        box_w, box_h = 128, 116
+        margin = 10
+        x0 = canvas_width - box_w - margin
+        y0 = margin
+        if x0 < margin:
+            return  # 위젯이 너무 좁으면 그리지 않음 (겹침 방지)
+
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 225))
+        painter.drawRoundedRect(QRectF(x0, y0, box_w, box_h), 8, 8)
+
+        font = QFont()
+        font.setPointSize(9)
+        painter.setFont(font)
+
+        origin_x = x0 + 26
+        label_x = x0 + 48
+        row_h = 30
+
+        red = QColor("#D8303A")
+        green = QColor("#1D9E75")
+        blue = QColor("#378ADD")
+
+        # Roll = X축 (오른쪽)
+        y_row = y0 + 22
+        self._draw_gizmo_arrow(painter, origin_x, y_row, origin_x + 22, y_row, red)
+        painter.setPen(red)
+        painter.drawText(label_x, y_row + 4, "Roll (X)")
+
+        # Pitch = Y축 (아래쪽)
+        y_row = y0 + 22 + row_h
+        self._draw_gizmo_arrow(painter, origin_x, y_row - 11, origin_x, y_row + 11, green)
+        painter.setPen(green)
+        painter.drawText(label_x, y_row + 4, "Pitch (Y)")
+
+        # Yaw = Z축 (화면 안쪽, ⊗ 심볼) + 정확한 +방향 원호(시계방향)
+        y_row = y0 + 22 + row_h * 2
+        cx, cy, r = float(origin_x), float(y_row), 7.0
+        painter.setPen(QPen(blue, 2.0))
+        painter.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+        d = r * 0.65
+        painter.drawLine(int(cx - d), int(cy - d), int(cx + d), int(cy + d))
+        painter.drawLine(int(cx - d), int(cy + d), int(cx + d), int(cy - d))
+
+        arc_r = 15.0
+        arc_rect = QRectF(cx - arc_r, cy - arc_r, arc_r * 2, arc_r * 2)
+        start_deg, span_deg = 40.0, -280.0  # Qt drawArc: 음수 span = 화면상 시계방향
+        painter.drawArc(arc_rect, int(start_deg * 16), int(span_deg * 16))
+        end_rad = math.radians(start_deg + span_deg)
+        ex = cx + arc_r * math.cos(end_rad)
+        ey = cy - arc_r * math.sin(end_rad)  # Qt 각도는 y-up 수학 convention
+        tangent = end_rad - math.pi / 2
+        painter.setBrush(blue)
+        head = 6.0
+        painter.drawPolygon(QPolygonF([
+            QPointF(ex, ey),
+            QPointF(ex - head * math.cos(tangent - 0.4), ey + head * math.sin(tangent - 0.4)),
+            QPointF(ex - head * math.cos(tangent + 0.4), ey + head * math.sin(tangent + 0.4)),
+        ]))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(blue)
+        painter.drawText(label_x, y_row + 4, "Yaw (Z)")
+
+        caption_font = QFont()
+        caption_font.setPointSize(7)
+        painter.setFont(caption_font)
+        painter.setPen(QColor("#888"))
+        painter.drawText(QRectF(x0 + 6, y0 + box_h - 16, box_w - 12, 14), Qt.AlignmentFlag.AlignLeft, "카메라 시점 기준")
+
+        painter.restore()
+
+    @staticmethod
+    def _draw_gizmo_arrow(painter: QPainter, x1: float, y1: float, x2: float, y2: float, color: QColor) -> None:
+        painter.setPen(QPen(color, 2.4))
+        painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+        angle = math.atan2(y2 - y1, x2 - x1)
+        head = 7.0
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygonF([
+            QPointF(x2, y2),
+            QPointF(x2 - head * math.cos(angle - 0.4), y2 - head * math.sin(angle - 0.4)),
+            QPointF(x2 - head * math.cos(angle + 0.4), y2 - head * math.sin(angle + 0.4)),
+        ]))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     @staticmethod
     def _mask_to_qimage(mask: np.ndarray, color: QColor) -> QImage | None:
