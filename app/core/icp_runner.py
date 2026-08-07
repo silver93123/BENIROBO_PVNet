@@ -130,11 +130,19 @@ class ICPParams:
     mask_erode_px: int = 1
 
     # [1] CAD 가시면 계산 파라미터.
+    # use_visible_face_filtering: False면 HPR을 아예 건너뛰고 CAD 전체를
+    #   그대로 정합 소스로 쓴다(뒤집힘 재정합용 서브셋도 마찬가지로 CAD
+    #   전체가 됨). 기본은 켜짐 - 카메라는 부분(partial) 뷰만 보는데 CAD
+    #   전체 겉면을 정합 대상으로 쓰면 중심(centroid)이 구조적으로
+    #   어긋나기 쉽다(이 파일 상단 2026-07 패치 [1] 참고). 꺼서 비교해보고
+    #   싶을 때, 혹은 CAD가 이미 얇거나 대부분 면이 카메라에서 보이는
+    #   부품이라 필터링 이득이 별로 없을 때 끄면 된다.
     # ref_distance_m: 카메라~부품 대략적인 작업 거리(m). 이 거리에 CAD를
     #   놓고 카메라(원점)에서 봤을 때 보이는 면만 정합에 사용한다.
     #   실제 세팅 거리로 맞출수록 가시면 판정이 정확해진다.
     # radius_factor: Katz2007 hidden_point_removal의 radius = CAD 대각선 * 이 값.
     #   값이 클수록 더 많은 면을 "보인다"고 관대하게 판정한다.
+    use_visible_face_filtering: bool = True
     cad_hpr_ref_distance_m: float = 0.6
     cad_hpr_radius_factor: float = 100.0
 
@@ -316,6 +324,84 @@ def build_visible_cad_pair(cad_pcd_full: o3d.geometry.PointCloud,
     cad_visible_normal = build_visible_cad(cad_pcd_full, R_fixed, params)
     cad_visible_flipped = build_visible_cad(cad_pcd_full, R_flip, params)
     return cad_visible_normal, cad_visible_flipped
+
+
+def build_cad_visibility_components(
+    cad_pcd_full: o3d.geometry.PointCloud, params: ICPParams,
+) -> tuple[dict[str, o3d.geometry.PointCloud], set[str]]:
+    """CAD 가시면 필터링(build_visible_cad)이 CAD의 어느 부분을 "보인다"고
+    판정했고 어느 부분을 제외했는지 3D로 직접 비교하기 위한 레이어들.
+
+    build_visible_cad()는 select_by_index가 고른 인덱스를 밖으로 노출하지
+    않아서(정합 계산용으로만 쓰이던 함수라 시각화 용도는 고려 안 됨) 여기서
+    HPR을 다시 계산하면서 인덱스를 직접 붙잡는다 - HPR 자체는 계산량이 크지
+    않아(CAD 1개당 한 번, 버튼 눌렀을 때만) 중복 계산 비용은 무시할 만하다.
+    기존 build_visible_cad()/build_visible_cad_pair() 시그니처는 다른 호출부
+    (icp_workbench_base.py, generate_pvnet_labels.py)와의 호환을 위해 그대로
+    둔다.
+
+    Returns:
+        components: 레이어 이름 -> 색칠된 PointCloud (최대 4개). 레이어 이름은
+            (open3d GUI 폰트가 한글 글리프를 기본 지원하지 않아 깨져 보이므로)
+            영문으로 뒀다:
+            "Visible Surface (Normal Pose, Used for ICP)" 초록,
+            "Excluded Surface (Normal Pose, Filtered Out)" 빨강,
+            "Visible Surface (Flipped Pose)" 주황,
+            "Excluded Surface (Flipped Pose)" 보라.
+            네 레이어 모두 원본 cad_pcd_full과 동일한 좌표계라 그대로 겹쳐
+            봐도 위치가 맞는다.
+        default_hidden: 뷰어를 처음 열었을 때 체크 해제 상태로 시작할 레이어
+            이름 집합 - "Flipped Pose" 레이어는 뒤집힘이 감지된 경우에만 실제로
+            쓰이는 부가 정보라 기본으로는 숨겨서 화면을 덜 복잡하게 한다.
+    """
+    def _visible_and_excluded_idx(R_fixed: np.ndarray) -> tuple[list[int], list[int]]:
+        placed = copy.deepcopy(cad_pcd_full)
+        T = np.eye(4)
+        T[:3, :3] = R_fixed
+        T[2, 3] = params.cad_hpr_ref_distance_m
+        placed.transform(T)
+
+        diameter = np.linalg.norm(
+            np.asarray(placed.get_max_bound()) - np.asarray(placed.get_min_bound()))
+        radius = diameter * params.cad_hpr_radius_factor
+        _, pt_map = placed.hidden_point_removal([0.0, 0.0, 0.0], radius)
+
+        visible_set = set(pt_map)
+        excluded_idx = [i for i in range(len(cad_pcd_full.points)) if i not in visible_set]
+        return list(pt_map), excluded_idx
+
+    R_normal = _Rz(params.init_yaw_deg) @ _Ry(params.init_pitch_deg) @ _Rx(params.init_roll_deg)
+    R_flip = np.diag([-1.0, -1.0, 1.0]) @ R_normal
+
+    color_by_key = {
+        "Visible Surface (Normal Pose, Used for ICP)": [0.15, 0.85, 0.25],
+        "Excluded Surface (Normal Pose, Filtered Out)": [0.75, 0.1, 0.1],
+        "Visible Surface (Flipped Pose)": [1.0, 0.55, 0.0],
+        "Excluded Surface (Flipped Pose)": [0.5, 0.05, 0.6],
+    }
+
+    components: dict[str, o3d.geometry.PointCloud] = {}
+    default_hidden: set[str] = set()
+
+    for R_fixed, vis_key, exc_key, hidden_by_default in (
+        (R_normal, "Visible Surface (Normal Pose, Used for ICP)", "Excluded Surface (Normal Pose, Filtered Out)", False),
+        (R_flip, "Visible Surface (Flipped Pose)", "Excluded Surface (Flipped Pose)", True),
+    ):
+        visible_idx, excluded_idx = _visible_and_excluded_idx(R_fixed)
+        if visible_idx:
+            v = cad_pcd_full.select_by_index(visible_idx)
+            v.paint_uniform_color(color_by_key[vis_key])
+            components[vis_key] = v
+            if hidden_by_default:
+                default_hidden.add(vis_key)
+        if excluded_idx:
+            e = cad_pcd_full.select_by_index(excluded_idx)
+            e.paint_uniform_color(color_by_key[exc_key])
+            components[exc_key] = e
+            if hidden_by_default:
+                default_hidden.add(exc_key)
+
+    return components, default_hidden
 
 
 # =============================================================================

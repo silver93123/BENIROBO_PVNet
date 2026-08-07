@@ -39,7 +39,7 @@ import open3d as o3d
 def _load_manifest(path: str) -> dict:
     """매니페스트 JSON 또는 (하위호환) 단일 .ply 경로를 받아 layers 리스트로 정규화."""
     if path.lower().endswith(".ply"):
-        return {"layers": [{"name": "결과", "file": path, "visible": True}]}
+        return {"layers": [{"name": "Result", "file": path, "visible": True}]}
 
     with open(path, "r", encoding="utf-8") as f:
         manifest = json.load(f)

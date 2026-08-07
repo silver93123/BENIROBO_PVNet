@@ -53,6 +53,26 @@ class FGRParams:
     refine_with_icp: bool = True          # FGR 결과를 point-to-plane ICP로 한 번 더 정밀화할지
     refine_max_dist_m: float = 0.003      # 정밀화 단계의 max_correspondence_distance
 
+    # 2026-08 추가: FGR은 T_init 없이 전역 탐색을 하다 보니, 대칭/반복
+    # 형상(볼트 머리의 육각 대칭, 브라켓의 반복 구멍 패턴 등)에서 실제와
+    # 90도/180도 정도 틀어진 "그럴듯하지만 틀린" 회전에 꽤 높은 fitness로
+    # 수렴하는 경우가 있다. use_rotation_prior=True면 FGR이 낸 회전을
+    # T_init(= icp_runner.build_icp_init()이 만든, '초기 roll/pitch/yaw'
+    # 고정값 기반 rotation)과 비교해서, 편차가 max_rotation_deviation_deg를
+    # 넘으면 FGR 결과를 버리고 T_init에서 바로 point-to-plane ICP로
+    # 정밀화한 결과를 대신 쓴다 - "그럴듯한 오탐"보다는 "초기값 기반 로컬
+    # 정합"이 실무적으로 더 안전하다는 판단.
+    use_rotation_prior: bool = True
+    max_rotation_deviation_deg: float = 60.0
+
+
+def _rotation_angle_deg(R_a: np.ndarray, R_b: np.ndarray) -> float:
+    """두 회전행렬 사이의 각도 차이(측지 거리, deg). R_a @ R_b.T의 회전각을 잰다."""
+    R_diff = R_a @ R_b.T
+    cos_angle = (np.trace(R_diff) - 1.0) / 2.0
+    cos_angle = float(np.clip(cos_angle, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos_angle)))
+
 
 def _compute_fpfh(pcd_down: o3d.geometry.PointCloud, fpfh_radius: float):
     return o3d.pipelines.registration.compute_fpfh_feature(
@@ -61,18 +81,20 @@ def _compute_fpfh(pcd_down: o3d.geometry.PointCloud, fpfh_radius: float):
 
 
 class FGRGlobalRegistration(PoseEstimator):
-    """FPFH 기반 FGR. T_init을 요구하지 않는다 (인터페이스 시그니처상 받긴
-    하지만 내부적으로 사용하지 않는다 - 완전히 무시).
+    """FPFH 기반 FGR. T_init 없이 전역 탐색하지만, 결과 회전을 T_init(prior)과
+    대조하는 용도로는 T_init을 받는다(use_rotation_prior 참고 - 완전히
+    무시하진 않는다).
 
     사용 예:
         estimator = FGRGlobalRegistration()                       # 기본 파라미터
         estimator = FGRGlobalRegistration(voxel_size_m=0.004, refine_with_icp=False)
-        result = estimator.estimate(cad_visible, scene_pcd, np.eye(4))  # T_init 무시됨
+        result = estimator.estimate(cad_visible, scene_pcd, T_init)
     """
 
     def __init__(self, voxel_size_m: float = 0.005, normal_radius_factor: float = 2.0,
                  fpfh_radius_factor: float = 5.0, distance_threshold_factor: float = 1.5,
-                 refine_with_icp: bool = True, refine_max_dist_m: float = 0.003):
+                 refine_with_icp: bool = True, refine_max_dist_m: float = 0.003,
+                 use_rotation_prior: bool = True, max_rotation_deviation_deg: float = 60.0):
         self.params = FGRParams(
             voxel_size_m=voxel_size_m,
             normal_radius_factor=normal_radius_factor,
@@ -80,6 +102,8 @@ class FGRGlobalRegistration(PoseEstimator):
             distance_threshold_factor=distance_threshold_factor,
             refine_with_icp=refine_with_icp,
             refine_max_dist_m=refine_max_dist_m,
+            use_rotation_prior=use_rotation_prior,
+            max_rotation_deviation_deg=max_rotation_deviation_deg,
         )
 
     def estimate(self, source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud,
@@ -132,8 +156,32 @@ class FGRGlobalRegistration(PoseEstimator):
             "method": "fgr (fpfh feature matching, centered, no T_init)",
         })
 
+        # 회전 prior 검증: FGR은 T_init 없이 전역 탐색하다 보니, 대칭/반복
+        # 형상(볼트 머리 육각 대칭, 브라켓 반복 구멍 패턴 등)에서 실제와
+        # 크게 어긋난 회전에 그럴듯한 fitness로 수렴하는 경우가 있다.
+        # T_init(icp_runner.build_icp_init()이 '초기 roll/pitch/yaw' 고정값으로
+        # 만든 rotation)과의 편차가 너무 크면 FGR 결과를 신뢰하지 않고
+        # T_init에서 바로 아래 ICP 정밀화를 시작한다 - "그럴듯한 오탐"보다는
+        # "초기값 기반 로컬 정합"이 실무적으로 더 안전하다.
+        if p.use_rotation_prior:
+            deviation_deg = _rotation_angle_deg(T[:3, :3], T_init[:3, :3])
+            if deviation_deg > p.max_rotation_deviation_deg:
+                stage_logs.append({
+                    "stage": "fgr_rotation_prior_reject",
+                    "deviation_deg": round(deviation_deg, 2),
+                    "max_allowed_deg": p.max_rotation_deviation_deg,
+                    "method": (
+                        f"FGR 회전이 초기 roll/pitch/yaw 기준과 {deviation_deg:.1f}도 "
+                        f"어긋남(허용 {p.max_rotation_deviation_deg:.1f}도) - "
+                        "대칭/반복 형상 오탐으로 보고 T_init 기반으로 대체"
+                    ),
+                })
+                T = T_init.copy()
+
         # FGR 단독 결과는 voxel 단위 정밀도라 거칠다. 실사용 가능한 정밀도가
-        # 필요하면 대부분 이 정밀화 단계가 필요하다 (기본 켜짐).
+        # 필요하면 대부분 이 정밀화 단계가 필요하다 (기본 켜짐). 위에서
+        # rotation prior에 걸려 T_init으로 대체된 경우, 이 단계가 사실상
+        # "표준 로컬 ICP" 역할을 하게 된다.
         if p.refine_with_icp:
             n_radius_fine = p.refine_max_dist_m * 2.0
             src_fine = _prep_stage_cloud(source, None, n_radius_fine)

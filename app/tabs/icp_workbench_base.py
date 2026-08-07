@@ -83,6 +83,7 @@ class ICPWorkbenchTab(QWidget):
         self._cad_axis_loaded: tuple[float, float, float] | None = None
         self._cad_init_rot_loaded: tuple[float, float, float] | None = None
         self._cad_ref_dist_loaded: float | None = None
+        self._cad_use_hpr_loaded: bool | None = None
         self._viewer_process: QProcess | None = None
         self._build_ui()
         self._refresh_checkpoint_display()
@@ -158,6 +159,15 @@ class ICPWorkbenchTab(QWidget):
         cad_hint.setStyleSheet("color: #888; font-size: 10px;")
         cad_hint.setWordWrap(True)
         left.addWidget(cad_hint)
+
+        btn_preview_visibility = QPushButton("CAD 가시면 미리보기")
+        btn_preview_visibility.setToolTip(
+            "정합에 실제로 쓰이는 '가시면'(초록)과 필터링돼서 제외된 면(빨강)을\n"
+            "3D로 직접 확인합니다. ICP를 안 돌려봐도 CAD만 있으면 바로 볼 수 있습니다."
+        )
+        btn_preview_visibility.clicked.connect(self._on_preview_cad_visibility)
+        left.addWidget(btn_preview_visibility)
+
         left.addStretch(1)
 
         splitter.addWidget(left_widget)
@@ -482,28 +492,45 @@ class ICPWorkbenchTab(QWidget):
 
         init_rot = params.init_rotation_deg
         ref_dist = params.cad_hpr_ref_distance_m
+        use_hpr = params.use_visible_face_filtering
         if (self._cad_visible_normal is None
                 or self._cad_init_rot_loaded != init_rot
-                or self._cad_ref_dist_loaded != ref_dist):
-            visible_normal, visible_flipped = icp_runner.build_visible_cad_pair(self._cad_pcd, params)
-            total = len(self._cad_pcd.points)
-            vis = len(visible_normal.points)
-            MIN_VISIBLE_RATIO = 0.05
-            if total == 0 or vis / total < MIN_VISIBLE_RATIO:
-                self.log_message.emit(
-                    f"[{self.LOG_PREFIX}] ⚠ CAD 가시면이 비정상적으로 적음({vis}/{total}점) - "
-                    f"'카메라~부품 거리(m)' 값을 확인하세요. 일단 CAD 전체로 폴백합니다."
-                )
+                or self._cad_ref_dist_loaded != ref_dist
+                or self._cad_use_hpr_loaded != use_hpr):
+            if not use_hpr:
+                # HPR 꺼짐 - CAD 전체를 그대로 정합 소스로 쓴다. 뒤집힘
+                # 재정합용 서브셋도 동일하게 CAD 전체가 된다(그래도
+                # correct_flipped_pose()는 "뒤집힌 초기 자세로 다시 정합
+                # 시도"라는 의미 자체는 그대로 유효함 - 소스 점군만 필터링
+                # 안 된 것뿐).
                 visible_normal = self._cad_pcd
                 visible_flipped = self._cad_pcd
+                total = vis = len(self._cad_pcd.points)
+                self.log_message.emit(
+                    f"[{self.LOG_PREFIX}] CAD 가시면 필터링 꺼짐 - CAD 전체({total}점)를 그대로 사용"
+                )
+            else:
+                visible_normal, visible_flipped = icp_runner.build_visible_cad_pair(self._cad_pcd, params)
+                total = len(self._cad_pcd.points)
+                vis = len(visible_normal.points)
+                MIN_VISIBLE_RATIO = 0.05
+                if total == 0 or vis / total < MIN_VISIBLE_RATIO:
+                    self.log_message.emit(
+                        f"[{self.LOG_PREFIX}] ⚠ CAD 가시면이 비정상적으로 적음({vis}/{total}점) - "
+                        f"'카메라~부품 거리(m)' 값을 확인하세요. 일단 CAD 전체로 폴백합니다."
+                    )
+                    visible_normal = self._cad_pcd
+                    visible_flipped = self._cad_pcd
             self._cad_visible_normal = visible_normal
             self._cad_visible_flipped = visible_flipped
             self._cad_init_rot_loaded = init_rot
             self._cad_ref_dist_loaded = ref_dist
-            self.log_message.emit(
-                f"[{self.LOG_PREFIX}] CAD 가시면 준비 완료: 전체 {total}점 -> 가시 {vis}점 "
-                f"({100*vis/total:.1f}%, 기준거리={ref_dist:.2f}m)"
-            )
+            self._cad_use_hpr_loaded = use_hpr
+            if use_hpr:
+                self.log_message.emit(
+                    f"[{self.LOG_PREFIX}] CAD 가시면 준비 완료: 전체 {total}점 -> 가시 {vis}점 "
+                    f"({100*vis/total:.1f}%, 기준거리={ref_dist:.2f}m)"
+                )
 
     # -------------------------------------------------------------- 결과 패널
     def _clear_result_panel(self) -> None:
@@ -717,16 +744,50 @@ class ICPWorkbenchTab(QWidget):
             QMessageBox.information(self, "알림", "표시할 포인트클라우드가 없습니다 (배경/검출 결과 모두 비어있음).")
             return
 
+        self._launch_viewer(components, title=f"ICP 결과 - {self._current_frame}", dir_tag=self._current_frame or "frame")
+
+    def _on_preview_cad_visibility(self) -> None:
+        """'CAD 가시면 미리보기' 버튼 - build_visible_cad()가 CAD의 어느
+        부분을 정합에 쓸 "가시면"으로 판정했는지 3D로 직접 보여준다.
+        ICP를 한 번도 안 돌려봤어도(검출 결과 없이도) CAD와 카메라~부품
+        거리(설정 탭)만 있으면 바로 확인할 수 있다."""
+        cad_path = self.cad_combo.currentData()
+        if not cad_path:
+            QMessageBox.warning(self, "알림", "먼저 CAD 모델을 선택하세요.")
+            return
+
+        params = self._build_icp_params()
+        self._ensure_cad_loaded(cad_path, params)
+        if self._cad_pcd is None:
+            return
+
+        components, default_hidden = icp_runner.build_cad_visibility_components(self._cad_pcd, params)
+        if not components:
+            QMessageBox.information(self, "알림", "가시면 계산 결과가 비어있습니다 (카메라~부품 거리 설정을 확인하세요).")
+            return
+
+        self._launch_viewer(
+            components, title=f"CAD 가시면 미리보기 - {Path(cad_path).name}",
+            dir_tag="cad_visibility", default_hidden=default_hidden,
+        )
+
+    def _launch_viewer(
+        self, components: dict, title: str, dir_tag: str, default_hidden: set | None = None,
+    ) -> None:
+        """components(레이어 이름 -> PointCloud)를 PLY로 저장하고 매니페스트를
+        만들어 app.core.icp_viewer를 서브프로세스로 띄운다 - ICP 결과 뷰어와
+        CAD 가시면 미리보기가 이 로직을 공유한다."""
         import open3d as o3d
 
-        view_dir = Path(tempfile.gettempdir()) / f"icp_view_{self._current_frame or 'frame'}"
+        view_dir = Path(tempfile.gettempdir()) / f"icp_view_{dir_tag}"
         view_dir.mkdir(parents=True, exist_ok=True)
 
+        default_hidden = default_hidden or set()
         layers = []
         for i, (name, pcd) in enumerate(components.items()):
             filename = f"layer_{i}.ply"
             o3d.io.write_point_cloud(str(view_dir / filename), pcd, write_ascii=False)
-            layers.append({"name": name, "file": filename, "visible": True})
+            layers.append({"name": name, "file": filename, "visible": name not in default_hidden})
 
         manifest_path = view_dir / "manifest.json"
         with open(manifest_path, "w", encoding="utf-8") as f:
@@ -746,11 +807,9 @@ class ICPWorkbenchTab(QWidget):
         self._viewer_process.finished.connect(self._on_viewer_process_finished)
         self._viewer_process.start(
             sys.executable,
-            ["-m", "app.core.icp_viewer", str(manifest_path), "--title", f"ICP 결과 - {self._current_frame}"],
+            ["-m", "app.core.icp_viewer", str(manifest_path), "--title", title],
         )
-        self.log_message.emit(
-            f"[{self.LOG_PREFIX}] 3D 뷰어 실행: {manifest_path} ({len(layers)}개 레이어)"
-        )
+        self.log_message.emit(f"[{self.LOG_PREFIX}] 3D 뷰어 실행: {manifest_path} ({len(layers)}개 레이어)")
 
     def _on_viewer_process_error(self, error) -> None:
         QMessageBox.critical(

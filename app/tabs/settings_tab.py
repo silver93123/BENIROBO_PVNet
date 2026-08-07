@@ -210,8 +210,16 @@ class SettingsTab(QWidget):
 
         self.spin_mask_erode = add_int(0, 0, "마스크 침식 px", defaults.mask_erode_px, 0, 10)
         self.spin_cad_ref_dist = add_double(0, 1, "카메라~부품 거리(m)", defaults.cad_hpr_ref_distance_m, 0.05, 5.0, 0.01, 3)
+        self.check_use_hpr = QCheckBox("CAD 가시면 필터링 사용 (HPR)")
+        self.check_use_hpr.setChecked(defaults.use_visible_face_filtering)
+        self.check_use_hpr.setToolTip(
+            "꺼지면 CAD 전체를 그대로 정합에 씁니다(카메라에 안 보이는 뒷면 포함).\n"
+            "'2. PVNet 라벨 생성' 탭의 'CAD 가시면 미리보기' 버튼으로 필터링 결과를 미리 볼 수 있습니다."
+        )
+        grid.addWidget(self.check_use_hpr, 0, 4, 1, 2)
         erode_hint = QLabel("마스크 침식: depth 경계 노이즈 완충용 (0=끔).\n"
-                             "카메라~부품 거리: CAD 가시면(보이는 면만 정합) 계산 기준값.")
+                             "카메라~부품 거리: CAD 가시면(보이는 면만 정합) 계산 기준값.\n"
+                             "HPR 끄면 이 거리값은 (미리보기 외에는) 안 쓰입니다.")
         erode_hint.setStyleSheet("color: #888; font-size: 10px;")
         erode_hint.setWordWrap(True)
         grid.addWidget(erode_hint, 10, 0, 1, 4)
@@ -329,6 +337,7 @@ class SettingsTab(QWidget):
             "averaging_min_valid_ratio": self.spin_min_valid_ratio.value(),
             "mask_erode_px": self.spin_mask_erode.value(),
             "cad_hpr_ref_distance_m": self.spin_cad_ref_dist.value(),
+            "use_visible_face_filtering": self.check_use_hpr.isChecked(),
             "pc_upsample_factor": self.spin_pc_upsample.value(),
             "pc_upsample_method": self.combo_pc_upsample_method.currentText(),
             "outlier_nb_neighbors": self.spin_outlier_n.value(),
@@ -365,6 +374,7 @@ class SettingsTab(QWidget):
         self.spin_min_valid_ratio.setValue(settings["averaging_min_valid_ratio"])
         self.spin_mask_erode.setValue(settings["mask_erode_px"])
         self.spin_cad_ref_dist.setValue(settings["cad_hpr_ref_distance_m"])
+        self.check_use_hpr.setChecked(settings["use_visible_face_filtering"])
         self.spin_pc_upsample.setValue(settings["pc_upsample_factor"])
         idx = self.combo_pc_upsample_method.findText(settings["pc_upsample_method"])
         self.combo_pc_upsample_method.setCurrentIndex(max(0, idx))

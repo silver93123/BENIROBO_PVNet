@@ -44,6 +44,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "averaging_min_valid_ratio": 0.6,
 
     # --- ICP 공통 (등록 알고리즘 무관) ---
+    "use_visible_face_filtering": True,
     "mask_erode_px": 1,
     "cad_hpr_ref_distance_m": 0.6,
     "pc_upsample_factor": 1,
@@ -78,6 +79,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 # checkpoint_path/config_path/score_threshold는 ICPParams 필드가 아니라
 # Detector/FrameContext 쪽에서 쓰는 값이라 제외한다.
 _ICP_PARAM_KEYS = [
+    "use_visible_face_filtering",
     "mask_erode_px", "cad_hpr_ref_distance_m", "pc_upsample_factor",
     "pc_upsample_method", "outlier_nb_neighbors", "outlier_std_ratio",
     "fitness_threshold", "xyz_max_m", "roll_limit_deg", "pitch_limit_deg",
