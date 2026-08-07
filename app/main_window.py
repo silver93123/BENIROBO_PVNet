@@ -3,21 +3,27 @@
 원본 BENIROBO_RTMDetTrain 프로젝트(탭 0~10)에서 PVNet 라벨링에 필요한
 탭만 들고 나온 최소 버전이다:
 
-    0. 설정           (이 프로젝트에서 새로 추가, settings_tab.py - ICP
-                        파라미터 + RTMDet-Ins 체크포인트/config 경로를
+    0. 설정           (settings_tab.py - ICP 파라미터(CAD 관련 제외) +
+                        RTMDet-Ins 체크포인트/config + 카메라 설정을
                         여기서만 편집한다. data/app_settings.json에 저장돼
                         앱을 재시작해도 유지된다.)
     1. 수동 라벨링    (구 "8. 수동 라벨링", manual_labeling_tab.py)
     2. PVNet 라벨 생성 (구 "10. PVNet 라벨 생성", pvnet_label_generation_tab.py)
-    3. PVNet 학습      (이 프로젝트에서 새로 추가, pvnet_train_tab.py -
-                         scripts/train_pvnet.py를 QProcess로 실행하는 GUI 래퍼)
+    3. PVNet 학습      (pvnet_train_tab.py - scripts/train_pvnet.py를
+                         QProcess로 실행하는 GUI 래퍼)
+    4. CAD 모델 설정   (cad_model_settings_tab.py - CAD 선택, 초기 자세/
+                         축보정/HPR 파라미터, CAD 가시면 미리보기, 그리고
+                         "초기 자세 vs 카메라 포인트클라우드 비교" - CAD를
+                         초기 roll/pitch/yaw로 놓았을 때 실제 카메라
+                         포인트클라우드와 방향이 맞는지 3D로 직접 대조)
 
 ICP 기반 탭(1, 2 - 정확히는 이들의 공통 조상인 ICPWorkbenchTab)은 더 이상
-체크포인트/config/ICP 파라미터를 직접 편집하지 않는다. 실행 시점마다
-app/core/settings_manager.load_settings()로 "설정" 탭에 저장된 최신값을
-다시 읽어 쓴다 - 이 탭을 미리 열어두지 않았어도 항상 최신값이 반영된다.
-각 ICP 탭의 "설정 열기" 버튼은 open_settings_requested 시그널을 emit하고,
-이 파일이 그 시그널을 받아 nav_tree에서 설정 탭으로 전환한다.
+체크포인트/config/CAD/ICP 파라미터를 직접 편집하지 않는다. 실행 시점마다
+app/core/settings_manager.load_settings()로 "설정"/"CAD 모델 설정" 탭에
+저장된 최신값을 다시 읽어 쓴다 - 이 탭들을 미리 열어두지 않았어도 항상
+최신값이 반영된다. 각 ICP 탭의 "설정 열기"/"CAD 모델 설정 열기" 버튼은
+open_settings_requested/open_cad_settings_requested 시그널을 emit하고,
+이 파일이 그 시그널을 받아 nav_tree에서 해당 탭으로 전환한다.
 
 RotHead/FoundationPose 관련 탭, 데이터 수집/세션 관리, 오프라인 검출
 테스트, RTMDet 학습 파이프라인은 이 프로젝트 범위에서 제외했다 - 필요한
@@ -41,6 +47,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from app.tabs.cad_model_settings_tab import CADModelSettingsTab
 from app.tabs.manual_labeling_tab import ManualLabelingTab
 from app.tabs.pvnet_label_generation_tab import PVNetLabelGenerationTab
 from app.tabs.pvnet_train_tab import PVNetTrainTab
@@ -112,6 +119,9 @@ class MainWindow(QMainWindow):
         self.pvnet_train_tab = PVNetTrainTab()
         self._add_leaf("3. PVNet 학습", self.pvnet_train_tab)
 
+        self.cad_model_settings_tab = CADModelSettingsTab()
+        self.cad_settings_nav_item = self._add_leaf("4. CAD 모델 설정", self.cad_model_settings_tab)
+
         self.nav_tree.currentItemChanged.connect(self._on_nav_changed)
 
         self.log_console = LogConsole()
@@ -122,10 +132,15 @@ class MainWindow(QMainWindow):
         self.manual_labeling_tab.log_message.connect(self.log_console.append_log)
         self.pvnet_label_gen_tab.log_message.connect(self.log_console.append_log)
         self.pvnet_train_tab.log_message.connect(self.log_console.append_log)
+        self.cad_model_settings_tab.log_message.connect(self.log_console.append_log)
 
-        # ICP 기반 탭의 "설정 열기" 버튼 -> 설정 탭으로 전환
+        # ICP 기반 탭의 "설정 열기"/"CAD 모델 설정 열기" 버튼 -> 해당 탭으로 전환
         self.manual_labeling_tab.open_settings_requested.connect(self._on_open_settings)
         self.pvnet_label_gen_tab.open_settings_requested.connect(self._on_open_settings)
+        self.manual_labeling_tab.open_cad_settings_requested.connect(self._on_open_cad_settings)
+        self.pvnet_label_gen_tab.open_cad_settings_requested.connect(self._on_open_cad_settings)
+        # CAD 모델 설정 탭의 "카메라 설정 열기" 버튼 -> 설정 탭으로 전환
+        self.cad_model_settings_tab.open_settings_requested.connect(self._on_open_settings)
 
         # 첫 화면: 트리의 첫 leaf 항목 선택
         first_leaf = self.nav_tree.topLevelItem(0)
@@ -152,6 +167,10 @@ class MainWindow(QMainWindow):
     def _on_open_settings(self) -> None:
         """ICP 기반 탭의 '설정 열기' 버튼(open_settings_requested)에 연결됨."""
         self.nav_tree.setCurrentItem(self.settings_nav_item)
+
+    def _on_open_cad_settings(self) -> None:
+        """ICP 기반 탭의 'CAD 모델 설정 열기' 버튼(open_cad_settings_requested)에 연결됨."""
+        self.nav_tree.setCurrentItem(self.cad_settings_nav_item)
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()

@@ -209,17 +209,7 @@ class SettingsTab(QWidget):
             return spin
 
         self.spin_mask_erode = add_int(0, 0, "마스크 침식 px", defaults.mask_erode_px, 0, 10)
-        self.spin_cad_ref_dist = add_double(0, 1, "카메라~부품 거리(m)", defaults.cad_hpr_ref_distance_m, 0.05, 5.0, 0.01, 3)
-        self.check_use_hpr = QCheckBox("CAD 가시면 필터링 사용 (HPR)")
-        self.check_use_hpr.setChecked(defaults.use_visible_face_filtering)
-        self.check_use_hpr.setToolTip(
-            "꺼지면 CAD 전체를 그대로 정합에 씁니다(카메라에 안 보이는 뒷면 포함).\n"
-            "'2. PVNet 라벨 생성' 탭의 'CAD 가시면 미리보기' 버튼으로 필터링 결과를 미리 볼 수 있습니다."
-        )
-        grid.addWidget(self.check_use_hpr, 0, 4, 1, 2)
-        erode_hint = QLabel("마스크 침식: depth 경계 노이즈 완충용 (0=끔).\n"
-                             "카메라~부품 거리: CAD 가시면(보이는 면만 정합) 계산 기준값.\n"
-                             "HPR 끄면 이 거리값은 (미리보기 외에는) 안 쓰입니다.")
+        erode_hint = QLabel("마스크 침식: depth 경계 노이즈 완충용 (0=끔).")
         erode_hint.setStyleSheet("color: #888; font-size: 10px;")
         erode_hint.setWordWrap(True)
         grid.addWidget(erode_hint, 10, 0, 1, 4)
@@ -244,24 +234,30 @@ class SettingsTab(QWidget):
         self.spin_outlier_n = add_int(1, 0, "outlier n", defaults.outlier_nb_neighbors, 1, 200)
         self.spin_outlier_std = add_double(1, 1, "outlier σ", defaults.outlier_std_ratio, 0.1, 10.0, 0.1, 2)
 
-        self.spin_fitness = add_double(2, 0, "fitness ≥", defaults.fitness_threshold, 0.0, 1.0, 0.01, 2)
-        self.spin_xyz_max = add_double(2, 1, "XYZ max (m)", defaults.xyz_max_m, 0.1, 10.0, 0.1, 2)
+        xyz_hint = QLabel("fitness는 이제 각 ICP 탭에서 직접 조정합니다(conf 슬라이더 옆).")
+        xyz_hint.setStyleSheet("color: #888; font-size: 10px;")
+        self.spin_xyz_max = add_double(2, 0, "XYZ max (m)", defaults.xyz_max_m, 0.1, 10.0, 0.1, 2)
+        grid.addWidget(xyz_hint, 2, 2, 1, 2)
 
         self.spin_roll_limit = add_double(3, 0, "roll ± deg", defaults.roll_limit_deg, 0.0, 180.0, 1.0, 1)
         self.spin_pitch_limit = add_double(3, 1, "pitch ± deg", defaults.pitch_limit_deg, 0.0, 180.0, 1.0, 1)
         self.spin_yaw_limit = add_double(4, 0, "yaw ± deg", defaults.yaw_limit_deg, 0.0, 180.0, 1.0, 1)
+        limit_hint = QLabel("정합 결과가 이 범위를 벗어나면 실패로 처리합니다(오정합 필터링용).\n"
+                             "CAD 초기 자세/축보정은 'CAD 모델 설정' 탭에서 관리합니다.")
+        limit_hint.setStyleSheet("color: #888; font-size: 10px;")
+        limit_hint.setWordWrap(True)
+        grid.addWidget(limit_hint, 5, 0, 1, 4)
 
-        self.spin_init_roll = add_double(5, 0, "초기 roll deg", defaults.init_roll_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_init_pitch = add_double(5, 1, "초기 pitch deg", defaults.init_pitch_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_init_yaw = add_double(6, 0, "초기 yaw deg", defaults.init_yaw_deg, -180.0, 180.0, 1.0, 1)
-
-        self.spin_axis_roll = add_double(7, 0, "CAD 축보정 roll", defaults.cad_axis_roll_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_axis_pitch = add_double(7, 1, "CAD 축보정 pitch", defaults.cad_axis_pitch_deg, -180.0, 180.0, 1.0, 1)
-        self.spin_axis_yaw = add_double(8, 0, "CAD 축보정 yaw", defaults.cad_axis_yaw_deg, -180.0, 180.0, 1.0, 1)
-        axis_hint = QLabel("ICP는 회전 없이 중심만 맞추고 시작합니다 - CAD가 실제 물체 방향과\n안 맞으면 여기부터 조정하세요 (CAD 바뀔 때마다 다시 맞춰야 함).")
-        axis_hint.setStyleSheet("color: #888; font-size: 10px;")
-        axis_hint.setWordWrap(True)
-        grid.addWidget(axis_hint, 9, 0, 1, 4)
+        self.check_use_pca_init = QCheckBox("씬 PCA 기반 초기 회전 추정 사용")
+        self.check_use_pca_init.setChecked(defaults.use_pca_init)
+        self.check_use_pca_init.setToolTip(
+            "켜면 '초기 roll/pitch/yaw' 고정값 대신, 매 인스턴스마다 관측된\n"
+            "포인트클라우드의 주성분(PCA)으로 회전 후보 여러 개를 만들어 시도하고\n"
+            "가장 잘 맞는 걸 씁니다 - 고정 초기값이 실제 자세와 크게 어긋나\n"
+            "로컬 최적점에 빠지는 문제에 도움이 됩니다. 후보를 여러 번 시도하는\n"
+            "만큼 인스턴스당 처리 시간이 늘어납니다."
+        )
+        grid.addWidget(self.check_use_pca_init, 6, 0, 1, 4)
 
         grid.addWidget(QLabel("정합 알고리즘 (fallback)"), 11, 0)
         self.combo_registration_type = QComboBox()
@@ -336,24 +332,16 @@ class SettingsTab(QWidget):
             "averaging_num_frames": self.spin_avg_frames.value(),
             "averaging_min_valid_ratio": self.spin_min_valid_ratio.value(),
             "mask_erode_px": self.spin_mask_erode.value(),
-            "cad_hpr_ref_distance_m": self.spin_cad_ref_dist.value(),
-            "use_visible_face_filtering": self.check_use_hpr.isChecked(),
             "pc_upsample_factor": self.spin_pc_upsample.value(),
             "pc_upsample_method": self.combo_pc_upsample_method.currentText(),
             "outlier_nb_neighbors": self.spin_outlier_n.value(),
             "outlier_std_ratio": self.spin_outlier_std.value(),
-            "fitness_threshold": self.spin_fitness.value(),
             "xyz_max_m": self.spin_xyz_max.value(),
             "roll_limit_deg": self.spin_roll_limit.value(),
             "pitch_limit_deg": self.spin_pitch_limit.value(),
             "yaw_limit_deg": self.spin_yaw_limit.value(),
-            "init_roll_deg": self.spin_init_roll.value(),
-            "init_pitch_deg": self.spin_init_pitch.value(),
-            "init_yaw_deg": self.spin_init_yaw.value(),
-            "cad_axis_roll_deg": self.spin_axis_roll.value(),
-            "cad_axis_pitch_deg": self.spin_axis_pitch.value(),
-            "cad_axis_yaw_deg": self.spin_axis_yaw.value(),
             "registration_type": self.combo_registration_type.currentText(),
+            "use_pca_init": self.check_use_pca_init.isChecked(),
             "fgr_voxel_size_m": self.spin_fgr_voxel.value(),
             "fgr_normal_radius_factor": self.spin_fgr_normal_factor.value(),
             "fgr_fpfh_radius_factor": self.spin_fgr_fpfh_factor.value(),
@@ -373,26 +361,18 @@ class SettingsTab(QWidget):
         self.spin_avg_frames.setValue(settings["averaging_num_frames"])
         self.spin_min_valid_ratio.setValue(settings["averaging_min_valid_ratio"])
         self.spin_mask_erode.setValue(settings["mask_erode_px"])
-        self.spin_cad_ref_dist.setValue(settings["cad_hpr_ref_distance_m"])
-        self.check_use_hpr.setChecked(settings["use_visible_face_filtering"])
         self.spin_pc_upsample.setValue(settings["pc_upsample_factor"])
         idx = self.combo_pc_upsample_method.findText(settings["pc_upsample_method"])
         self.combo_pc_upsample_method.setCurrentIndex(max(0, idx))
         self.spin_outlier_n.setValue(settings["outlier_nb_neighbors"])
         self.spin_outlier_std.setValue(settings["outlier_std_ratio"])
-        self.spin_fitness.setValue(settings["fitness_threshold"])
         self.spin_xyz_max.setValue(settings["xyz_max_m"])
         self.spin_roll_limit.setValue(settings["roll_limit_deg"])
         self.spin_pitch_limit.setValue(settings["pitch_limit_deg"])
         self.spin_yaw_limit.setValue(settings["yaw_limit_deg"])
-        self.spin_init_roll.setValue(settings["init_roll_deg"])
-        self.spin_init_pitch.setValue(settings["init_pitch_deg"])
-        self.spin_init_yaw.setValue(settings["init_yaw_deg"])
-        self.spin_axis_roll.setValue(settings["cad_axis_roll_deg"])
-        self.spin_axis_pitch.setValue(settings["cad_axis_pitch_deg"])
-        self.spin_axis_yaw.setValue(settings["cad_axis_yaw_deg"])
         idx = self.combo_registration_type.findText(settings["registration_type"])
         self.combo_registration_type.setCurrentIndex(max(0, idx))
+        self.check_use_pca_init.setChecked(settings["use_pca_init"])
         self.spin_fgr_voxel.setValue(settings["fgr_voxel_size_m"])
         self.spin_fgr_normal_factor.setValue(settings["fgr_normal_radius_factor"])
         self.spin_fgr_fpfh_factor.setValue(settings["fgr_fpfh_radius_factor"])

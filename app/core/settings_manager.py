@@ -43,6 +43,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "averaging_num_frames": 8,       # 1이면 평균화 없음(기존과 동일)
     "averaging_min_valid_ratio": 0.6,
 
+    # --- CAD 모델 ('CAD 모델 설정' 탭에서 관리) ---
+    "cad_path": "",
+
     # --- ICP 공통 (등록 알고리즘 무관) ---
     "use_visible_face_filtering": True,
     "mask_erode_px": 1,
@@ -63,6 +66,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "cad_axis_pitch_deg": 90.0,
     "cad_axis_yaw_deg": 90.0,
     "registration_type": "open3d_multistage",
+    "use_pca_init": False,
 
     # --- FGR (registration_type == "fgr_global"일 때만 쓰임) ---
     "fgr_voxel_size_m": 0.005,
@@ -85,7 +89,7 @@ _ICP_PARAM_KEYS = [
     "fitness_threshold", "xyz_max_m", "roll_limit_deg", "pitch_limit_deg",
     "yaw_limit_deg", "init_roll_deg", "init_pitch_deg", "init_yaw_deg",
     "cad_axis_roll_deg", "cad_axis_pitch_deg", "cad_axis_yaw_deg",
-    "registration_type", "fgr_voxel_size_m", "fgr_normal_radius_factor",
+    "registration_type", "use_pca_init", "fgr_voxel_size_m", "fgr_normal_radius_factor",
     "fgr_fpfh_radius_factor", "fgr_distance_threshold_factor",
     "fgr_refine_with_icp", "fgr_refine_max_dist_m", "fgr_use_rotation_prior",
     "fgr_max_rotation_deviation_deg",

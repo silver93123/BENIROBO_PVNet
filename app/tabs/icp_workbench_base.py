@@ -33,28 +33,32 @@ import numpy as np
 from PyQt6.QtCore import pyqtSignal, Qt, QProcess
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QFileDialog, QMessageBox, QLineEdit, QComboBox, QScrollArea, QFrame,
+    QFileDialog, QMessageBox, QLineEdit, QScrollArea, QFrame,
     QGroupBox, QTabWidget, QDoubleSpinBox, QCheckBox, QSplitter,
 )
 
 from app.core.detector import Detection
 from app.core.camera_intrinsics import estimate_intrinsics_from_organized_pcd, project_points
-from app.core.paths import DEFAULT_CAD_DIR
 from app.core.pipeline_context import FrameContext
-from app.widgets.image_viewer import ImageViewer
+from app.widgets.image_viewer import (
+    ImageViewer, DEFAULT_MASK_ALPHA, DEFAULT_LABEL_ALPHA, DEFAULT_POSE_OVERLAY_ALPHA,
+)
 from app.core import icp_runner, settings_manager
 from app.core.icp_runner import ICPResult, ICPParams
 from app.tabs.icp_pipelines import AVAILABLE_ICP_PIPELINES
+from app.tabs.viewer_launcher import Viewer3DMixin
 
-CAD_EXTS = {".stl", ".ply", ".obj"}
 CAD_OVERLAY_MAX_POINTS = 300  # ICP 결과 오버레이용 CAD 서브샘플 점 개수 (속도/시인성용)
 
 
-class ICPWorkbenchTab(QWidget):
+class ICPWorkbenchTab(Viewer3DMixin, QWidget):
     log_message = pyqtSignal(str)
     #: '설정 열기' 버튼이 눌리면 발생 - main_window.py가 이 시그널을 받아
     #: nav_tree에서 설정 탭을 선택하도록 연결한다.
     open_settings_requested = pyqtSignal()
+    #: 'CAD 모델 설정 열기' 버튼이 눌리면 발생 - main_window.py가 받아서
+    #: nav_tree에서 'CAD 모델 설정' 탭을 선택하도록 연결한다.
+    open_cad_settings_requested = pyqtSignal()
 
     #: 로그 메시지 접두어. 서브클래스가 오버라이드해서 탭을 구분한다
     #: (예: "ICP 탭" vs "ICP(TCP) 탭").
@@ -87,7 +91,7 @@ class ICPWorkbenchTab(QWidget):
         self._viewer_process: QProcess | None = None
         self._build_ui()
         self._refresh_checkpoint_display()
-        self._refresh_cad_list()
+        self._refresh_cad_display()
 
     # =============================================================
     # 서브클래스 필수 구현
@@ -145,28 +149,15 @@ class ICPWorkbenchTab(QWidget):
         ckpt_layout.addWidget(btn_open_settings_ckpt)
         left.addWidget(ckpt_group)
 
-        left.addWidget(QLabel("CAD 모델"))
-        cad_row = QHBoxLayout()
-        self.cad_combo = QComboBox()
-        cad_row.addWidget(self.cad_combo, stretch=1)
-        btn_refresh_cad = QPushButton("↻")
-        btn_refresh_cad.setFixedWidth(28)
-        btn_refresh_cad.setToolTip("data/cad/ 폴더 다시 스캔")
-        btn_refresh_cad.clicked.connect(self._refresh_cad_list)
-        cad_row.addWidget(btn_refresh_cad)
-        left.addLayout(cad_row)
-        cad_hint = QLabel(f"{DEFAULT_CAD_DIR} 폴더 스캔")
-        cad_hint.setStyleSheet("color: #888; font-size: 10px;")
-        cad_hint.setWordWrap(True)
-        left.addWidget(cad_hint)
-
-        btn_preview_visibility = QPushButton("CAD 가시면 미리보기")
-        btn_preview_visibility.setToolTip(
-            "정합에 실제로 쓰이는 '가시면'(초록)과 필터링돼서 제외된 면(빨강)을\n"
-            "3D로 직접 확인합니다. ICP를 안 돌려봐도 CAD만 있으면 바로 볼 수 있습니다."
-        )
-        btn_preview_visibility.clicked.connect(self._on_preview_cad_visibility)
-        left.addWidget(btn_preview_visibility)
+        cad_group = QGroupBox("CAD 모델 (설정은 'CAD 모델 설정' 탭에서 관리)")
+        cad_layout = QVBoxLayout(cad_group)
+        self.cad_display_label = QLabel()
+        self.cad_display_label.setWordWrap(True)
+        cad_layout.addWidget(self.cad_display_label)
+        btn_open_cad_settings = QPushButton("CAD 모델 설정 열기")
+        btn_open_cad_settings.clicked.connect(self.open_cad_settings_requested.emit)
+        cad_layout.addWidget(btn_open_cad_settings)
+        left.addWidget(cad_group)
 
         left.addStretch(1)
 
@@ -201,6 +192,22 @@ class ICPWorkbenchTab(QWidget):
         )
         run_row.addWidget(self.thresh_slider)
         run_row.addWidget(self.thresh_label)
+
+        run_row.addWidget(QLabel("fitness"))
+        self.fitness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fitness_slider.setRange(0, 100)
+        self.fitness_slider.setValue(int(settings_manager.load_settings()["fitness_threshold"] * 100))
+        self.fitness_slider.setFixedWidth(90)
+        self.fitness_slider.setToolTip(
+            "ICP 정합 성공 기준(fitness ≥ 이 값). 예전엔 '설정' 탭에서만 바꿀 수 있었는데,\n"
+            "결과를 보면서 바로바로 조정할 수 있게 여기로 옮겼습니다."
+        )
+        self.fitness_label = QLabel(f"{self.fitness_slider.value() / 100:.2f}")
+        self.fitness_slider.valueChanged.connect(
+            lambda v: self.fitness_label.setText(f"{v / 100:.2f}")
+        )
+        run_row.addWidget(self.fitness_slider)
+        run_row.addWidget(self.fitness_label)
         run_row.addStretch(1)
         center.addLayout(run_row)
 
@@ -237,6 +244,20 @@ class ICPWorkbenchTab(QWidget):
         self.check_show_axis_gizmo.toggled.connect(self.image_viewer.set_axis_gizmo_visible)
         gizmo_toggle_row.addWidget(self.check_show_axis_gizmo)
         center.addLayout(gizmo_toggle_row)
+
+        opacity_row = QHBoxLayout()
+        self.mask_alpha_slider = self._add_opacity_control(
+            opacity_row, "마스크", DEFAULT_MASK_ALPHA, self.image_viewer.set_mask_alpha,
+        )
+        self.label_alpha_slider = self._add_opacity_control(
+            opacity_row, "라벨/박스", DEFAULT_LABEL_ALPHA, self.image_viewer.set_label_alpha,
+        )
+        self.pose_alpha_slider = self._add_opacity_control(
+            opacity_row, "CAD 오버레이", DEFAULT_POSE_OVERLAY_ALPHA, self.image_viewer.set_pose_overlay_alpha,
+        )
+        opacity_row.addStretch(1)
+        center.addLayout(opacity_row)
+
         center.addWidget(self.image_viewer, stretch=1)
 
         center_widget = QWidget()
@@ -278,11 +299,32 @@ class ICPWorkbenchTab(QWidget):
     def _build_icp_params(self) -> ICPParams:
         """실행 시점마다 항상 최신 저장 설정을 다시 읽는다 - 이 탭 인스턴스가
         먼저 만들어진 뒤 사용자가 '설정' 탭에서 값을 바꿨어도(혹은 다른
-        프로세스가 재시작 사이 파일을 바꿨어도) 항상 최신값을 쓴다."""
+        프로세스가 재시작 사이 파일을 바꿨어도) 항상 최신값을 쓴다.
+
+        fitness_threshold만은 예외 - '설정' 탭이 아니라 이 탭의 fitness
+        슬라이더(conf 슬라이더와 동일한 패턴) 값을 그대로 쓴다. 결과를
+        보면서 바로바로 조정하고 싶다는 요청 반영."""
         settings = settings_manager.load_settings()
-        return ICPParams(**settings_manager.icp_params_kwargs(settings))
+        kwargs = settings_manager.icp_params_kwargs(settings)
+        kwargs["fitness_threshold"] = self.fitness_slider.value() / 100.0
+        return ICPParams(**kwargs)
 
     # ------------------------------------------------------ 체크포인트
+    @staticmethod
+    def _add_opacity_control(layout, label: str, default_alpha: int, setter) -> "QSlider":
+        """오버레이 요소 하나(마스크/라벨박스/CAD 오버레이)의 투명도 슬라이더를
+        만들어 layout에 붙이고 setter(0~255)에 연결한다. 0=완전 투명,
+        255=완전 불투명. 기본값은 기존 시각적 결과와 동일하게 맞춰뒀다."""
+        from PyQt6.QtWidgets import QSlider
+        layout.addWidget(QLabel(label))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 255)
+        slider.setValue(default_alpha)
+        slider.setFixedWidth(70)
+        slider.valueChanged.connect(setter)
+        layout.addWidget(slider)
+        return slider
+
     def _refresh_checkpoint_display(self) -> None:
         """'설정' 탭에 저장된 체크포인트/config 경로를 읽어 읽기전용 필드에 반영."""
         settings = settings_manager.load_settings()
@@ -296,20 +338,17 @@ class ICPWorkbenchTab(QWidget):
         # 탭이 화면에 보일 때마다 갱신 - '설정' 탭에서 방금 저장하고 이
         # 탭으로 돌아왔을 때 읽기전용 필드가 바로 최신값을 보여주게 한다.
         self._refresh_checkpoint_display()
+        self._refresh_cad_display()
 
     # ------------------------------------------------------------ CAD
-    def _refresh_cad_list(self) -> None:
-        self.cad_combo.clear()
-        if not DEFAULT_CAD_DIR.is_dir():
-            self.log_message.emit(f"[{self.LOG_PREFIX}] CAD 폴더 없음: {DEFAULT_CAD_DIR}")
-            return
-        files = sorted(
-            f for f in DEFAULT_CAD_DIR.iterdir()
-            if f.is_file() and f.suffix.lower() in CAD_EXTS
-        )
-        for f in files:
-            self.cad_combo.addItem(f.name, str(f))
-        self.log_message.emit(f"[{self.LOG_PREFIX}] CAD 폴더 스캔: {len(files)}개")
+    def _refresh_cad_display(self) -> None:
+        """'CAD 모델 설정' 탭에 저장된 CAD 경로를 읽어 읽기전용 표시에 반영."""
+        cad_path = settings_manager.load_settings().get("cad_path", "")
+        if cad_path:
+            self.cad_display_label.setText(f"CAD: {Path(cad_path).name}")
+            self.cad_display_label.setToolTip(cad_path)
+        else:
+            self.cad_display_label.setText("CAD가 아직 지정되지 않았습니다.")
 
     # ------------------------------------------------------ 상태 리셋
     def _reset_frame_state(self, keep_frame: bool = False) -> None:
@@ -393,12 +432,14 @@ class ICPWorkbenchTab(QWidget):
         if not self._last_detections:
             QMessageBox.warning(self, "알림", "먼저 2D 검출을 실행하세요.")
             return
-        cad_index = self.cad_combo.currentIndex()
-        if cad_index < 0:
-            QMessageBox.warning(self, "알림", "CAD 모델을 선택하세요 (data/cad/ 폴더가 비어있지 않은지 확인).")
+        cad_path = settings_manager.load_settings().get("cad_path", "")
+        if not cad_path:
+            QMessageBox.warning(
+                self, "알림",
+                "CAD 모델이 아직 지정되지 않았습니다. 'CAD 모델 설정' 탭에서 지정하고 저장하세요.",
+            )
             return
 
-        cad_path = self.cad_combo.itemData(cad_index)
         params = self._build_icp_params()
         try:
             self._ensure_cad_loaded(cad_path, params)
@@ -745,89 +786,3 @@ class ICPWorkbenchTab(QWidget):
             return
 
         self._launch_viewer(components, title=f"ICP 결과 - {self._current_frame}", dir_tag=self._current_frame or "frame")
-
-    def _on_preview_cad_visibility(self) -> None:
-        """'CAD 가시면 미리보기' 버튼 - build_visible_cad()가 CAD의 어느
-        부분을 정합에 쓸 "가시면"으로 판정했는지 3D로 직접 보여준다.
-        ICP를 한 번도 안 돌려봤어도(검출 결과 없이도) CAD와 카메라~부품
-        거리(설정 탭)만 있으면 바로 확인할 수 있다."""
-        cad_path = self.cad_combo.currentData()
-        if not cad_path:
-            QMessageBox.warning(self, "알림", "먼저 CAD 모델을 선택하세요.")
-            return
-
-        params = self._build_icp_params()
-        self._ensure_cad_loaded(cad_path, params)
-        if self._cad_pcd is None:
-            return
-
-        components, default_hidden = icp_runner.build_cad_visibility_components(self._cad_pcd, params)
-        if not components:
-            QMessageBox.information(self, "알림", "가시면 계산 결과가 비어있습니다 (카메라~부품 거리 설정을 확인하세요).")
-            return
-
-        self._launch_viewer(
-            components, title=f"CAD 가시면 미리보기 - {Path(cad_path).name}",
-            dir_tag="cad_visibility", default_hidden=default_hidden,
-        )
-
-    def _launch_viewer(
-        self, components: dict, title: str, dir_tag: str, default_hidden: set | None = None,
-    ) -> None:
-        """components(레이어 이름 -> PointCloud)를 PLY로 저장하고 매니페스트를
-        만들어 app.core.icp_viewer를 서브프로세스로 띄운다 - ICP 결과 뷰어와
-        CAD 가시면 미리보기가 이 로직을 공유한다."""
-        import open3d as o3d
-
-        view_dir = Path(tempfile.gettempdir()) / f"icp_view_{dir_tag}"
-        view_dir.mkdir(parents=True, exist_ok=True)
-
-        default_hidden = default_hidden or set()
-        layers = []
-        for i, (name, pcd) in enumerate(components.items()):
-            filename = f"layer_{i}.ply"
-            o3d.io.write_point_cloud(str(view_dir / filename), pcd, write_ascii=False)
-            layers.append({"name": name, "file": filename, "visible": name not in default_hidden})
-
-        manifest_path = view_dir / "manifest.json"
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump({"layers": layers}, f, ensure_ascii=False, indent=2)
-
-        if self._viewer_process is not None and self._viewer_process.state() != QProcess.ProcessState.NotRunning:
-            self._viewer_process.kill()
-
-        self._viewer_process = QProcess(self)
-        # 2026-08 추가: 이전엔 완전히 fire-and-forget이라 뷰어 프로세스가
-        # 조용히 죽어도(open3d 버전 문제, GPU/디스플레이 문제 등) 사용자가
-        # 알 방법이 없었다 - "3D 뷰어가 안 열리는데 이유를 모르겠다" 문의의
-        # 흔한 원인. 이제 stdout/stderr를 모아뒀다가 비정상 종료 시 그대로
-        # 보여준다.
-        self._viewer_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self._viewer_process.errorOccurred.connect(self._on_viewer_process_error)
-        self._viewer_process.finished.connect(self._on_viewer_process_finished)
-        self._viewer_process.start(
-            sys.executable,
-            ["-m", "app.core.icp_viewer", str(manifest_path), "--title", title],
-        )
-        self.log_message.emit(f"[{self.LOG_PREFIX}] 3D 뷰어 실행: {manifest_path} ({len(layers)}개 레이어)")
-
-    def _on_viewer_process_error(self, error) -> None:
-        QMessageBox.critical(
-            self, "3D 뷰어 실행 실패",
-            f"뷰어 프로세스를 시작하지 못했습니다: {error}\n\n"
-            f"'{sys.executable}' 실행 파일 경로/권한을 확인하세요.",
-        )
-
-    def _on_viewer_process_finished(self, exit_code: int, exit_status) -> None:
-        if exit_code == 0:
-            return  # 정상 종료(사용자가 창을 닫음) - 조용히 넘어감
-        output = ""
-        if self._viewer_process is not None:
-            output = bytes(self._viewer_process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        tail = output.strip()[-1500:] if output.strip() else "(출력 없음)"
-        self.log_message.emit(f"[{self.LOG_PREFIX}] 3D 뷰어가 비정상 종료됨 (exit code {exit_code})")
-        QMessageBox.critical(
-            self, "3D 뷰어 오류",
-            f"뷰어 프로세스가 오류로 종료됐습니다 (exit code {exit_code}).\n\n"
-            f"{tail}",
-        )

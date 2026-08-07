@@ -121,6 +121,16 @@ class ICPParams:
     fgr_use_rotation_prior: bool = True
     fgr_max_rotation_deviation_deg: float = 60.0
 
+    # 2026-08 추가: 씬 포인트클라우드의 주성분(PCA)에서 초기 회전을 추정.
+    # 기본은 꺼짐(기존과 완전히 동일 - '초기 roll/pitch/yaw' 고정값만 씀).
+    # 켜면 씬 인스턴스와 CAD 각각의 PCA 주축을 정렬하는 회전 후보 여러 개를
+    # 만들어서 각각 정합해보고 fitness가 가장 좋은 걸 채택한다 - '초기
+    # roll/pitch/yaw'가 실제 놓인 자세와 크게 다를 때 로컬 최적점에 빠지는
+    # 문제를 완화한다. 자세한 원리는 estimate_pca_rotation_candidates() 참고.
+    # 대가: 후보 개수만큼 정합을 더 시도하므로 인스턴스당 처리 시간이 늘어난다
+    # (프리스크린으로 완화하긴 하나, 완전히 공짜는 아님).
+    use_pca_init: bool = False
+
     fitness_threshold: float = 0.7
     xyz_max_m: float = 2.0
 
@@ -415,6 +425,133 @@ def build_icp_init(scene_source, cad_visible, params: ICPParams) -> np.ndarray:
     T_init[:3, :3] = R_init
     T_init[:3, 3] = sc_center - R_init @ cd_center
     return T_init
+
+
+# =============================================================================
+# PCA 기반 초기 회전 후보 (2026-08 추가, use_pca_init=True일 때만 쓰임)
+# =============================================================================
+PCA_MIN_POINTS = 30       # 이보다 점이 적으면 PCA가 불안정하다고 보고 고정 초기값으로 폴백
+PCA_TOP_K = 2             # 프리스크린 상위 몇 개 후보만 완전히 정밀화할지
+PCA_PRESCREEN_VOXEL = 0.006
+PCA_PRESCREEN_MAX_DIST = 0.02
+PCA_PRESCREEN_MAX_ITER = 30
+
+
+def _pca_axes(points: np.ndarray) -> np.ndarray:
+    """points(N,3) -> (3,3) 직교행렬. 열이 분산이 큰 순서(주성분1, 2, 3).
+
+    PCA 고유벡터는 부호가 정해지지 않는다(구현/데이터에 따라 반대 방향이
+    나올 수 있음) - 이건 이 함수의 한계가 아니라 PCA 자체의 수학적 특성이라,
+    호출부(estimate_pca_rotation_candidates)에서 가능한 부호 조합을 전부
+    후보로 다룬다.
+    """
+    centered = points - points.mean(axis=0)
+    cov = (centered.T @ centered) / max(len(points) - 1, 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)  # 오름차순으로 반환됨
+    order = np.argsort(eigvals)[::-1]
+    return eigvecs[:, order]
+
+
+def estimate_pca_rotation_candidates(cad_pts: np.ndarray, scene_pts: np.ndarray) -> list[np.ndarray]:
+    """CAD와 씬 각각의 PCA 주축을 정렬하는 회전 후보들(3x3)을 만든다.
+
+    씬 인스턴스 포인트클라우드 자체의 형상 분포에서 주축을 뽑아 CAD의
+    주축과 맞추는 방식이라, '초기 roll/pitch/yaw' 고정값이 실제 놓인
+    자세와 크게 어긋나 있어도 데이터 기반으로 대략적인 방향을 잡을 수 있다.
+
+    PCA 고유벡터의 부호가 정해지지 않는 문제(위 _pca_axes 참고) 때문에,
+    가능한 부호 조합(2^3=8가지) 중 "고유 회전"(반사가 아님, det=+1)이
+    되는 조합만 후보로 남긴다 - 정확히 4가지가 남는다. 즉 이 함수는 항상
+    최대 4개의 회전 후보를 반환한다(대칭축 근처에서 두 주성분 분산이
+    비슷하면 후보들끼리 거의 비슷해질 수 있음 - 그래도 무해하다, 뒤에서
+    fitness로 골라내므로).
+    """
+    cad_axes = _pca_axes(cad_pts)
+    scene_axes = _pca_axes(scene_pts)
+
+    candidates = []
+    for sx in (1, -1):
+        for sy in (1, -1):
+            for sz in (1, -1):
+                signs = np.array([sx, sy, sz], dtype=np.float64)
+                R = scene_axes @ (cad_axes * signs).T
+                if np.linalg.det(R) <= 0:
+                    continue  # 반사(reflection) - 유효한 회전이 아님
+                # 부동소수점 오차 정리 - 가장 가까운 정확한 회전행렬로 투영
+                U, _, Vt = np.linalg.svd(R)
+                R = U @ Vt
+                if np.linalg.det(R) < 0:
+                    U[:, -1] *= -1
+                    R = U @ Vt
+                candidates.append(R)
+    return candidates
+
+
+def run_icp_with_pca_candidates(
+    cad_source: o3d.geometry.PointCloud, scene_source: o3d.geometry.PointCloud,
+    params: ICPParams, estimator: PoseEstimator,
+) -> tuple[np.ndarray, float, float, list[dict]]:
+    """PCA 후보 여러 개로 각각 정합을 시도해 fitness가 가장 좋은 결과를 채택.
+
+    비용을 줄이기 위해 2단계로 나눈다:
+      1) 프리스크린: 거친 다운샘플 + point-to-point ICP 한 번씩(빠름)으로
+         후보들을 대충 줄세우기만 한다.
+      2) 정밀화: 상위 PCA_TOP_K개만 estimator(기본 다단계 coarse-to-fine)로
+         완전히 정밀 정합하고, 그중 최종 fitness가 가장 좋은 걸 반환한다.
+    점이 너무 적어(PCA_MIN_POINTS 미만) PCA가 불안정할 것 같으면 조용히
+    build_icp_init() 고정 초기값 방식으로 폴백한다.
+    """
+    cad_pts = np.asarray(cad_source.points)
+    scene_pts = np.asarray(scene_source.points)
+
+    if len(cad_pts) < PCA_MIN_POINTS or len(scene_pts) < PCA_MIN_POINTS:
+        T_init = build_icp_init(scene_source, cad_source, params)
+        T, fit, rmse, stage_logs = run_icp_multistage(cad_source, scene_source, T_init, params, estimator=estimator)
+        stage_logs = [{"stage": "pca_init_skipped", "reason": "포인트 부족 - 고정 초기값으로 폴백"}] + stage_logs
+        return T, fit, rmse, stage_logs
+
+    cd_center = cad_pts.mean(axis=0)
+    sc_center = scene_pts.mean(axis=0)
+
+    rotation_candidates = estimate_pca_rotation_candidates(cad_pts, scene_pts)
+    T_candidates = []
+    for R in rotation_candidates:
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = sc_center - R @ cd_center
+        T_candidates.append(T)
+
+    # 1단계: 프리스크린
+    src_quick = cad_source.voxel_down_sample(PCA_PRESCREEN_VOXEL)
+    tgt_quick = scene_source.voxel_down_sample(PCA_PRESCREEN_VOXEL)
+    if len(src_quick.points) == 0:
+        src_quick = cad_source
+    if len(tgt_quick.points) == 0:
+        tgt_quick = scene_source
+
+    ranked = []
+    prescreen_logs = []
+    for i, T in enumerate(T_candidates):
+        res = o3d.pipelines.registration.registration_icp(
+            src_quick, tgt_quick, PCA_PRESCREEN_MAX_DIST, T,
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=PCA_PRESCREEN_MAX_ITER),
+        )
+        ranked.append((float(res.fitness), float(res.inlier_rmse), T))
+        prescreen_logs.append({
+            "stage": f"pca_prescreen_{i}", "fitness": float(res.fitness), "rmse": float(res.inlier_rmse),
+        })
+    ranked.sort(key=lambda x: (-x[0], x[1]))  # fitness 내림차순, 동점이면 rmse 오름차순
+
+    # 2단계: 상위 후보만 완전히 정밀화
+    best_T, best_fit, best_rmse, best_logs = None, -1.0, None, []
+    for _, _, T_cand in ranked[:PCA_TOP_K]:
+        T_full, fit_full, rmse_full, stage_logs_full = run_icp_multistage(
+            cad_source, scene_source, T_cand, params, estimator=estimator)
+        if fit_full > best_fit:
+            best_T, best_fit, best_rmse, best_logs = T_full, fit_full, rmse_full, stage_logs_full
+
+    return best_T, best_fit, best_rmse, prescreen_logs + best_logs
 
 
 def check_rotation_constraint(T: np.ndarray, params: ICPParams) -> tuple[bool, str]:
@@ -762,8 +899,17 @@ def run_icp_for_instance(instance_id: int, pts_mm: np.ndarray, cad_pcd,
                           num_points_after_outlier=n_after, raw_scene_pcd=raw_scene_pcd)
 
     estimator = _build_default_estimator(p)
-    T_init = T_init_override if T_init_override is not None else build_icp_init(sc, cad_visible_normal, p)
-    T, fit, rmse, stage_logs = run_icp_multistage(cad_visible_normal, sc, T_init, p, estimator=estimator)
+    if T_init_override is not None:
+        T_init = T_init_override
+        T, fit, rmse, stage_logs = run_icp_multistage(cad_visible_normal, sc, T_init, p, estimator=estimator)
+    elif p.use_pca_init:
+        # 씬 인스턴스의 PCA 주축으로 회전 후보를 여러 개 만들어 시도 -
+        # '초기 roll/pitch/yaw' 고정값이 실제 자세와 크게 어긋나 로컬
+        # 최적점에 빠지는 문제를 완화한다 (run_icp_with_pca_candidates 참고).
+        T, fit, rmse, stage_logs = run_icp_with_pca_candidates(cad_visible_normal, sc, p, estimator)
+    else:
+        T_init = build_icp_init(sc, cad_visible_normal, p)
+        T, fit, rmse, stage_logs = run_icp_multistage(cad_visible_normal, sc, T_init, p, estimator=estimator)
     T, fit, rmse, flipped, flip_stage_logs = correct_flipped_pose(
         T, cad_visible_normal, cad_visible_flipped, sc, p, estimator=estimator)
     if flipped:

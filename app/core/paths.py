@@ -39,6 +39,11 @@ CAMERA_CONFIG_PATHS = {
     "femto_bolt": PROJECT_ROOT / "configs" / "camera_config_femto.yaml",
 }
 
+# CAD 파일로 인식할 확장자. icp_workbench_base.py와 cad_model_settings_tab.py가
+# 공유한다 (전자는 지금은 안 쓰지만 CAD 스캔 로직이 남아있는 다른 곳에서도
+# 재사용할 수 있게 여기 한 곳에 둠).
+CAD_EXTS = {".stl", ".ply", ".obj"}
+
 
 def resolve_relative_to_project(path_str: str) -> Path:
     """path_str이 상대경로면 PROJECT_ROOT 기준으로, 절대경로면 그대로 반환."""

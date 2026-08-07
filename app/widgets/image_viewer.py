@@ -10,11 +10,12 @@ from PyQt6.QtWidgets import QLabel, QSizePolicy
 
 from app.core.detector import Detection
 
-MASK_ALPHA = 100  # 0~255, 마스크 반투명도 (낮을수록 더 투명)
-POSE_OVERLAY_ALPHA = 100  # 0~255, pose 미리보기 윤곽선 반투명도 (낮을수록 더 투명)
+DEFAULT_MASK_ALPHA = 100  # 0~255, 마스크 반투명도 기본값 (낮을수록 더 투명)
+DEFAULT_LABEL_ALPHA = 255  # 0~255, bbox 선/라벨 배경 반투명도 기본값 (기존과 동일하게 완전 불투명)
+DEFAULT_POSE_OVERLAY_ALPHA = 100  # 0~255, pose/CAD 오버레이 반투명도 기본값
 POSE_OVERLAY_RADIUS = 2.5  # px
 POSE_OVERLAY_LINE_WIDTH = 1.2  # px, 윤곽선 두께 (채워진 원이 아니라 속이 빈 원)
-POSE_OVERLAY_COLOR = QColor(0, 220, 255, POSE_OVERLAY_ALPHA)  # 하늘색 - 노란 볼트 실물과 안 겹치게
+POSE_OVERLAY_BASE_COLOR = (0, 220, 255)  # 하늘색 - 노란 볼트 실물과 안 겹치게
 
 
 class ImageViewer(QLabel):
@@ -28,10 +29,28 @@ class ImageViewer(QLabel):
         self._detections: list[Detection] = []
         self._pose_overlays: dict[int, np.ndarray] = {}  # obj index -> (N,2) 투영된 2D 점
         self._show_axis_gizmo = True
+        self._mask_alpha = DEFAULT_MASK_ALPHA
+        self._label_alpha = DEFAULT_LABEL_ALPHA
+        self._pose_overlay_alpha = DEFAULT_POSE_OVERLAY_ALPHA
         self.setText("이미지를 불러오세요")
 
     def set_axis_gizmo_visible(self, visible: bool) -> None:
         self._show_axis_gizmo = visible
+        self._refresh()
+
+    def set_mask_alpha(self, alpha: int) -> None:
+        """2D 검출 마스크 채우기 반투명도 (0=완전 투명, 255=완전 불투명)."""
+        self._mask_alpha = alpha
+        self._refresh()
+
+    def set_label_alpha(self, alpha: int) -> None:
+        """bbox 테두리 + 라벨 배경 반투명도."""
+        self._label_alpha = alpha
+        self._refresh()
+
+    def set_pose_overlay_alpha(self, alpha: int) -> None:
+        """pose/CAD 정합 결과 오버레이(윤곽선 점) 반투명도."""
+        self._pose_overlay_alpha = alpha
         self._refresh()
 
     def load_image(self, path: str) -> None:
@@ -80,28 +99,34 @@ class ImageViewer(QLabel):
             if det.mask is None:
                 continue
             color = colors[i % len(colors)]
-            mask_image = self._mask_to_qimage(det.mask, color)
+            mask_image = self._mask_to_qimage(det.mask, color, self._mask_alpha)
             if mask_image is not None:
                 painter.drawImage(0, 0, mask_image)
 
         # 2단계: bbox + 라벨
         for i, det in enumerate(self._detections):
             color = colors[i % len(colors)]
-            pen = QPen(color, 3)
+            box_color = QColor(color)
+            box_color.setAlpha(self._label_alpha)
+            pen = QPen(box_color, 3)
             painter.setPen(pen)
             x1, y1, x2, y2 = det.bbox
             painter.drawRect(QRectF(x1, y1, x2 - x1, y2 - y1))
 
             label_text = f"obj{i}: {det.label} {det.confidence:.2f}"
-            painter.fillRect(QRectF(x1, y1 - 20, 8 * len(label_text), 20), color)
-            painter.setPen(QPen(QColor("white")))
+            painter.fillRect(QRectF(x1, y1 - 20, 8 * len(label_text), 20), box_color)
+            label_text_color = QColor("white")
+            label_text_color.setAlpha(self._label_alpha)
+            painter.setPen(QPen(label_text_color))
             painter.drawText(int(x1) + 4, int(y1) - 5, label_text)
             painter.setPen(pen)
 
         # 3단계: pose 미리보기 오버레이 (반투명 노란 "윤곽선" 원 - CAD를 현재
         # 입력 각도로 투영한 것. 속이 빈 원이라 실제 물체 사진이 안 가려지고,
         # 실루엣과 겹치면 입력한 각도가 잘 맞다는 뜻).
-        overlay_pen = QPen(POSE_OVERLAY_COLOR, POSE_OVERLAY_LINE_WIDTH)
+        overlay_color = QColor(*POSE_OVERLAY_BASE_COLOR)
+        overlay_color.setAlpha(self._pose_overlay_alpha)
+        overlay_pen = QPen(overlay_color, POSE_OVERLAY_LINE_WIDTH)
         painter.setPen(overlay_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for points_2d in self._pose_overlays.values():
@@ -232,7 +257,7 @@ class ImageViewer(QLabel):
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
     @staticmethod
-    def _mask_to_qimage(mask: np.ndarray, color: QColor) -> QImage | None:
+    def _mask_to_qimage(mask: np.ndarray, color: QColor, alpha: int) -> QImage | None:
         """(H, W) bool 마스크를 반투명 RGBA QImage로 변환한다 (원본 이미지 크기와 동일해야 함)."""
         if mask is None or mask.ndim != 2:
             return None
@@ -242,7 +267,7 @@ class ImageViewer(QLabel):
         rgba[..., 0] = color.red()
         rgba[..., 1] = color.green()
         rgba[..., 2] = color.blue()
-        rgba[..., 3] = np.where(mask, MASK_ALPHA, 0).astype(np.uint8)
+        rgba[..., 3] = np.where(mask, alpha, 0).astype(np.uint8)
 
         data = rgba.tobytes()
         qimage = QImage(data, w, h, w * 4, QImage.Format.Format_RGBA8888)
