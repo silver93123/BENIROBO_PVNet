@@ -57,13 +57,16 @@ FINE_RTMDet_EXE/scripts/bp_icp.py 를 이식했다. 원본과의 차이:
 from __future__ import annotations
 
 import copy
+import hashlib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
 import open3d as o3d
 from scipy.ndimage import distance_transform_edt
 
+from app.core.paths import PROJECT_ROOT
 from app.core.registration import PoseEstimator, create_registrator
 
 # =============================================================================
@@ -217,11 +220,41 @@ def _Rz(d):
 # =============================================================================
 # CAD 로드
 # =============================================================================
+# open3d 0.16+부터 sample_points_poisson_disk()에서 seed 파라미터가 빠졌다
+# (공식 이슈: https://github.com/isl-org/Open3D/issues/6114 - "resulting in
+# inconsistent results when sampling points"). 즉 CAD를 새로 로드할 때마다
+# (앱 재시작, CAD 선택 변경, 축보정 값 변경) 완전히 다른 점 배치가 뽑히고,
+# 이게 ICP 대응점 계산에 영향을 줘서 "실행할 때마다 정합되는 오브젝트가
+# 달라지는" 현상의 실질적 원인이 된다. open3d API 레벨에서 시드를 고정할
+# 방법이 없으므로, 한 번 샘플링한 결과를 디스크에 캐시해서 재사용하는
+# 방식으로 우회한다 - 같은 CAD 파일 + 같은 축보정이면 항상 같은 점을 쓴다.
+_CAD_CACHE_DIR = PROJECT_ROOT / "data" / "cad_cache"
+
+
+def _cad_cache_path(cad_path: str, axis_correction_deg: tuple[float, float, float]) -> Path:
+    key = f"{Path(cad_path).resolve()}|{axis_correction_deg}|{CAD_SAMPLE_POINTS}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    return _CAD_CACHE_DIR / f"{Path(cad_path).stem}_{digest}.ply"
+
+
 def load_cad_as_pcd(cad_path, params: ICPParams | None = None) -> o3d.geometry.PointCloud:
     """STL/PLY/OBJ 메쉬를 로드해서 균일 샘플링한 포인트클라우드로 반환한다.
     바운딩박스가 10을 넘으면(=mm 단위로 저장된 CAD) 자동으로 m 단위로 스케일한다.
-    params.cad_axis_correction_deg로 축 보정을 적용한다 (CAD/설치 상태마다 다시 맞춰야 함)."""
+    params.cad_axis_correction_deg로 축 보정을 적용한다 (CAD/설치 상태마다 다시 맞춰야 함).
+
+    샘플링 결과는 (cad_path, 축보정, 샘플 개수) 조합별로 디스크에 캐시된다 -
+    CAD 원본 파일이 캐시보다 나중에 수정됐으면 캐시를 버리고 다시 샘플링한다
+    (CAD를 새로 export한 경우 등에 대비).
+    """
     p = params if params is not None else default_params()
+    axis = tuple(p.cad_axis_correction_deg)
+
+    cache_path = _cad_cache_path(str(cad_path), axis)
+    cad_file = Path(cad_path)
+    if cache_path.is_file() and cad_file.is_file() and cache_path.stat().st_mtime >= cad_file.stat().st_mtime:
+        cached = o3d.io.read_point_cloud(str(cache_path))
+        if len(cached.points) > 0:
+            return cached
 
     mesh = o3d.io.read_triangle_mesh(str(cad_path))
     if len(mesh.vertices) == 0:
@@ -231,14 +264,19 @@ def load_cad_as_pcd(cad_path, params: ICPParams | None = None) -> o3d.geometry.P
     if ext.max() > 10.0:
         mesh.scale(1.0 / 1000.0, center=np.zeros(3))
 
-    rx, ry, rz = p.cad_axis_correction_deg
+    rx, ry, rz = axis
     R = _Rz(rz) @ _Ry(ry) @ _Rx(rx)
     center = np.asarray(mesh.get_center())
     T_fix = np.eye(4); T_fix[:3, :3] = R; T_fix[:3, 3] = center - R @ center
     mesh.transform(T_fix)
 
     mesh.compute_vertex_normals()
-    return mesh.sample_points_poisson_disk(CAD_SAMPLE_POINTS)
+    pcd = mesh.sample_points_poisson_disk(CAD_SAMPLE_POINTS)
+
+    _CAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    o3d.io.write_point_cloud(str(cache_path), pcd, write_ascii=False)
+
+    return pcd
 
 
 # =============================================================================

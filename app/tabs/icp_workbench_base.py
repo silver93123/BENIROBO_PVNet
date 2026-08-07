@@ -34,7 +34,7 @@ from PyQt6.QtCore import pyqtSignal, Qt, QProcess
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QMessageBox, QLineEdit, QComboBox, QScrollArea, QFrame,
-    QGroupBox, QTabWidget, QDoubleSpinBox, QCheckBox,
+    QGroupBox, QTabWidget, QDoubleSpinBox, QCheckBox, QSplitter,
 )
 
 from app.core.detector import Detection
@@ -113,12 +113,19 @@ class ICPWorkbenchTab(QWidget):
     # =============================================================
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        # 좌/중앙/우 세 패널을 QSplitter에 담아서 경계선을 마우스로 드래그해
+        # 폭을 조절할 수 있게 한다 - 예전엔 좌(340px)/우(280px) 폭이
+        # 고정이라 결과 패널이 좁아도 늘릴 방법이 없었다.
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        root.addWidget(splitter)
 
         # ------------------------------------------------------- 좌측
         left = QVBoxLayout()
         left_widget = QWidget()
         left_widget.setLayout(left)
-        left_widget.setFixedWidth(340)
+        left_widget.setMinimumWidth(220)
 
         left.addWidget(self._build_acquisition_panel())
 
@@ -153,7 +160,7 @@ class ICPWorkbenchTab(QWidget):
         left.addWidget(cad_hint)
         left.addStretch(1)
 
-        root.addWidget(left_widget)
+        splitter.addWidget(left_widget)
 
         # ------------------------------------------------------- 중앙
         center = QVBoxLayout()
@@ -221,13 +228,17 @@ class ICPWorkbenchTab(QWidget):
         gizmo_toggle_row.addWidget(self.check_show_axis_gizmo)
         center.addLayout(gizmo_toggle_row)
         center.addWidget(self.image_viewer, stretch=1)
-        root.addLayout(center, stretch=2)
+
+        center_widget = QWidget()
+        center_widget.setLayout(center)
+        center_widget.setMinimumWidth(320)
+        splitter.addWidget(center_widget)
 
         # ------------------------------------------------------- 우측
         right = QVBoxLayout()
         right_widget = QWidget()
         right_widget.setLayout(right)
-        right_widget.setFixedWidth(280)
+        right_widget.setMinimumWidth(220)
 
         self.result_title_label = QLabel("ICP 결과")
         right.addWidget(self.result_title_label)
@@ -244,7 +255,14 @@ class ICPWorkbenchTab(QWidget):
         self.btn_open_viewer.setEnabled(False)
         right.addWidget(self.btn_open_viewer)
 
-        root.addWidget(right_widget)
+        splitter.addWidget(right_widget)
+
+        # 초기 폭 비율 (이후엔 사용자가 경계선을 드래그해서 자유롭게 조절).
+        # 사용자가 특히 우측 결과 패널을 넓혀 쓰고 싶어했으므로 조금 더 준다.
+        splitter.setSizes([340, 700, 340])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
 
     # ------------------------------------------------------ ICP 파라미터
     def _build_icp_params(self) -> ICPParams:
@@ -520,23 +538,15 @@ class ICPWorkbenchTab(QWidget):
             layout.addWidget(title)
 
             if r.ok:
-                pose = r.pose["euler_deg"]
-                pos = r.pick_point_mm
                 status = QLabel(f"fitness {r.fitness:.3f}")
                 status.setStyleSheet("color: #2a8a2a;")
                 layout.addWidget(status)
-                pos_label = QLabel(f"pick X{pos[0]:+.1f} Y{pos[1]:+.1f} Z{pos[2]:+.1f} mm")
-                layout.addWidget(pos_label)
-                rot_label = QLabel(
-                    f"R{pose['roll_deg']:+.1f} P{pose['pitch_deg']:+.1f} Y{pose['yaw_deg']:+.1f} deg"
-                )
-                layout.addWidget(rot_label)
                 if r.was_flipped:
                     flip_label = QLabel("뒤집힘 보정됨")
                     flip_label.setStyleSheet("color: #888; font-size: 10px;")
                     layout.addWidget(flip_label)
 
-                layout.addWidget(self._build_rotation_tune_row(r.instance_id, pos_label, rot_label))
+                layout.addWidget(self._build_pose_edit_row(r.instance_id))
             else:
                 status = QLabel(r.error or "실패")
                 status.setStyleSheet("color: #c0392b;")
@@ -547,108 +557,137 @@ class ICPWorkbenchTab(QWidget):
 
             self.result_layout.insertWidget(self.result_layout.count() - 1, card)
 
-    def _build_rotation_tune_row(self, instance_id: int, pos_label: QLabel, rot_label: QLabel) -> QWidget:
-        """ICP 결과가 살짝 틀어졌을 때 눈으로 보면서 미세조정하는 컨트롤.
+    def _build_pose_edit_row(self, instance_id: int) -> QWidget:
+        """ICP 결과의 위치(mm)/회전(deg)을 "델타 보정량"이 아니라 현재 값을
+        직접 편집하는 방식으로 바꾼다.
 
-        Δroll/Δpitch/Δyaw(deg)는 항상 "이 ICP 결과 원본" 기준 델타이고,
-        카메라(씬) 좌표계에서 회전을 덧씌운다(R_new = R_delta @ R_icp) -
-        물체 자신의 로컬 축이 아니라 화면에서 보이는 대로 X/Y/Z 축을
-        돌리는 감각에 가깝다. 위치(pick point)는 건드리지 않는다 -
-        회전만 미세조정한다는 요청 그대로.
+        이전 버전은 Δroll/Δpitch/Δyaw 입력칸이 항상 0에서 시작해서, "지금
+        실제 각도가 몇 도인지"는 옆 라벨을 따로 봐야 했다. 이제는 스핀박스
+        자체가 현재 값을 그대로 보여주고, 편집하면 그 값 자체가 곧 새
+        pose가 된다 - 두 세트의 숫자를 오가며 볼 필요가 없다.
+
+        위치는 "pick point"(CAD 중심을 이 pose로 옮긴 좌표, 카드에 항상
+        표시되던 값) 기준으로 편집한다. 회전 칸만 바꾸면 위치 칸은 그대로
+        유지되므로, 회전이 pick point를 중심으로 일어나 물체가 제자리에서
+        도는 것처럼 보인다(구현: t = pick_point - R_new @ cad_center로
+        역산). 회전 범위 제한(예전 ±90도)도 없앴다 - _Rx/_Ry/_Rz는 임의의
+        각도에 대해 항상 well-defined라 굳이 좁게 막을 이유가 없다.
         """
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 4, 0, 0)
-        layout.addWidget(QLabel("회전 미세조정 (Δdeg)"))
 
-        row = QHBoxLayout()
-        spins = {}
-        for axis_label, key in (("R", "droll"), ("P", "dpitch"), ("Y", "dyaw")):
-            row.addWidget(QLabel(axis_label))
+        target = next((r for r in self._last_icp_results if r.instance_id == instance_id), None)
+        if target is None or target.T is None:
+            return widget
+        pos0 = target.pick_point_mm or [0.0, 0.0, 0.0]
+        euler0 = (target.pose or {}).get("euler_deg", {"roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0})
+
+        layout.addWidget(QLabel("위치 (mm, pick point)"))
+        pos_row = QHBoxLayout()
+        pos_spins = {}
+        for axis_label, key, val in (("X", "x", pos0[0]), ("Y", "y", pos0[1]), ("Z", "z", pos0[2])):
+            pos_row.addWidget(QLabel(axis_label))
             spin = QDoubleSpinBox()
-            spin.setRange(-90.0, 90.0)
+            spin.setRange(-100000.0, 100000.0)  # mm - 실질적으로 무제한 (신뢰 범위는 '설정' 탭의 xyz_max_m으로 이미 걸러짐)
+            spin.setSingleStep(1.0)
+            spin.setDecimals(1)
+            spin.setFixedWidth(62)
+            spin.setValue(val)
+            pos_row.addWidget(spin)
+            pos_spins[key] = spin
+        layout.addLayout(pos_row)
+
+        layout.addWidget(QLabel("회전 (deg)"))
+        rot_row = QHBoxLayout()
+        rot_spins = {}
+        for axis_label, key, val in (
+            ("R", "roll", euler0["roll_deg"]), ("P", "pitch", euler0["pitch_deg"]), ("Y", "yaw", euler0["yaw_deg"]),
+        ):
+            rot_row.addWidget(QLabel(axis_label))
+            spin = QDoubleSpinBox()
+            spin.setRange(-360.0, 360.0)  # 예전 ±90도 제한 제거
             spin.setSingleStep(0.5)
             spin.setDecimals(1)
-            spin.setFixedWidth(60)
-            row.addWidget(spin)
-            spins[key] = spin
-        layout.addLayout(row)
+            spin.setFixedWidth(62)
+            spin.setValue(val)
+            rot_row.addWidget(spin)
+            rot_spins[key] = spin
+        layout.addLayout(rot_row)
 
-        btn_reset = QPushButton("리셋")
-        btn_reset.setToolTip("이 인스턴스의 ICP 원본 pose로 되돌립니다.")
+        btn_reset = QPushButton("ICP 원본으로 리셋")
+        btn_reset.setToolTip("이 인스턴스의 위치/회전을 ICP가 처음 낸 값으로 되돌립니다.")
         layout.addWidget(btn_reset)
 
-        def on_delta_changed(_value=None):
-            self._apply_rotation_delta(
-                instance_id, spins["droll"].value(), spins["dpitch"].value(), spins["dyaw"].value(),
-                pos_label, rot_label,
+        all_spins = list(pos_spins.values()) + list(rot_spins.values())
+
+        def on_changed(_value=None):
+            self._apply_pose_edit(
+                instance_id,
+                pos_spins["x"].value(), pos_spins["y"].value(), pos_spins["z"].value(),
+                rot_spins["roll"].value(), rot_spins["pitch"].value(), rot_spins["yaw"].value(),
             )
 
-        for spin in spins.values():
-            spin.valueChanged.connect(on_delta_changed)
+        for spin in all_spins:
+            spin.valueChanged.connect(on_changed)
 
         def on_reset():
-            for spin in spins.values():
+            T_original = self._icp_original_T.get(instance_id)
+            if T_original is None:
+                return
+            orig_euler = icp_runner.transform_to_pose(T_original)["euler_deg"]
+            if self._cad_pcd is not None:
+                cad_center_m = np.asarray(self._cad_pcd.get_center())
+                orig_pick_mm = ((T_original[:3, :3] @ cad_center_m + T_original[:3, 3]) * 1000.0).tolist()
+            else:
+                orig_pick_mm = (T_original[:3, 3] * 1000.0).tolist()
+
+            for spin in all_spins:
                 spin.blockSignals(True)
-                spin.setValue(0.0)
+            pos_spins["x"].setValue(orig_pick_mm[0])
+            pos_spins["y"].setValue(orig_pick_mm[1])
+            pos_spins["z"].setValue(orig_pick_mm[2])
+            rot_spins["roll"].setValue(orig_euler["roll_deg"])
+            rot_spins["pitch"].setValue(orig_euler["pitch_deg"])
+            rot_spins["yaw"].setValue(orig_euler["yaw_deg"])
+            for spin in all_spins:
                 spin.blockSignals(False)
-            on_delta_changed()
+            on_changed()
 
         btn_reset.clicked.connect(on_reset)
 
-        self._result_card_widgets[instance_id] = {
-            "pos_label": pos_label, "rot_label": rot_label, "spins": spins,
-        }
+        self._result_card_widgets[instance_id] = {"pos_spins": pos_spins, "rot_spins": rot_spins}
         return widget
 
-    def _apply_rotation_delta(
-        self, instance_id: int, droll: float, dpitch: float, dyaw: float,
-        pos_label: QLabel, rot_label: QLabel,
+    def _apply_pose_edit(
+        self, instance_id: int,
+        x_mm: float, y_mm: float, z_mm: float,
+        roll_deg: float, pitch_deg: float, yaw_deg: float,
     ) -> None:
-        """Δroll/Δpitch/Δyaw를 화면에 찍힌 R/P/Y 숫자에 직접 더한다.
-
-        이전 버전은 카메라 좌표계에서 R_delta @ R_원본으로 회전을 "합성"했는데,
-        3D 회전 합성은 교환법칙이 성립하지 않아서(비가환) - 특히 원본 회전이
-        이미 항등행렬에서 많이 벗어나 있으면(예: roll이 -75도처럼 큰 값) -
-        R만 건드려도 재분해된 P/Y 표시값까지 같이 바뀌어버린다. 이건 수학적으로는
-        틀린 게 아니지만, "R 슬라이더는 R만 바꾼다"는 직관과 안 맞아 혼란스럽다.
-
-        그래서 여기서는 manual_labeling_tab.py가 각도 입력에서 pose를 만드는
-        방식(R = Rz(yaw) @ Ry(pitch) @ Rx(roll))과 동일하게, 원본을
-        roll/pitch/yaw로 분해한 뒤 델타를 각 성분에 독립적으로 더하고 그
-        값으로 새 회전행렬을 처음부터 다시 만든다 - 이러면 Δroll은 R
-        표시값에만, Δpitch는 P에만, Δyaw는 Y에만 정확히 반영된다.
-        """
-        from app.core.icp_runner import _Rx, _Ry, _Rz  # 언더스코어 접두 - 이 파일 밖 재사용 관례(manual_labeling_tab.py)와 동일
-
-        T_original = self._icp_original_T.get(instance_id)
-        if T_original is None:
-            return
-
-        orig_euler = icp_runner.transform_to_pose(T_original)["euler_deg"]
-        new_roll = orig_euler["roll_deg"] + droll
-        new_pitch = orig_euler["pitch_deg"] + dpitch
-        new_yaw = orig_euler["yaw_deg"] + dyaw
-
-        R_new = _Rz(new_yaw) @ _Ry(new_pitch) @ _Rx(new_roll)
-        T_new = T_original.copy()
-        T_new[:3, :3] = R_new
-        # 위치(translation)는 원본 그대로 유지 - 회전만 미세조정.
+        """스핀박스에 입력된 절대 위치/회전값으로 pose(T)를 직접 재구성한다
+        (Δ보정량을 더하는 방식이 아님 - 스핀박스 값 자체가 곧 새 pose)."""
+        from app.core.icp_runner import _Rx, _Ry, _Rz
 
         target = next((r for r in self._last_icp_results if r.instance_id == instance_id), None)
         if target is None:
             return
-        target.T = T_new
-        target.pose = icp_runner.transform_to_pose(T_new)
+
+        R_new = _Rz(yaw_deg) @ _Ry(pitch_deg) @ _Rx(roll_deg)
+        pick_point_m = np.array([x_mm, y_mm, z_mm]) / 1000.0
 
         if self._cad_pcd is not None:
             cad_center_m = np.asarray(self._cad_pcd.get_center())
-            target.pick_point_mm = ((T_new[:3, :3] @ cad_center_m + T_new[:3, 3]) * 1000.0).tolist()
+            t_new = pick_point_m - R_new @ cad_center_m
+        else:
+            t_new = pick_point_m
 
-        pose = target.pose["euler_deg"]
-        pos = target.pick_point_mm
-        pos_label.setText(f"pick X{pos[0]:+.1f} Y{pos[1]:+.1f} Z{pos[2]:+.1f} mm")
-        rot_label.setText(f"R{pose['roll_deg']:+.1f} P{pose['pitch_deg']:+.1f} Y{pose['yaw_deg']:+.1f} deg")
+        T_new = np.eye(4)
+        T_new[:3, :3] = R_new
+        T_new[:3, 3] = t_new
+
+        target.T = T_new
+        target.pose = icp_runner.transform_to_pose(T_new)
+        target.pick_point_mm = [x_mm, y_mm, z_mm]
 
         self._update_cad_overlay(self._last_icp_results)
 
@@ -697,10 +736,39 @@ class ICPWorkbenchTab(QWidget):
             self._viewer_process.kill()
 
         self._viewer_process = QProcess(self)
+        # 2026-08 추가: 이전엔 완전히 fire-and-forget이라 뷰어 프로세스가
+        # 조용히 죽어도(open3d 버전 문제, GPU/디스플레이 문제 등) 사용자가
+        # 알 방법이 없었다 - "3D 뷰어가 안 열리는데 이유를 모르겠다" 문의의
+        # 흔한 원인. 이제 stdout/stderr를 모아뒀다가 비정상 종료 시 그대로
+        # 보여준다.
+        self._viewer_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._viewer_process.errorOccurred.connect(self._on_viewer_process_error)
+        self._viewer_process.finished.connect(self._on_viewer_process_finished)
         self._viewer_process.start(
             sys.executable,
             ["-m", "app.core.icp_viewer", str(manifest_path), "--title", f"ICP 결과 - {self._current_frame}"],
         )
         self.log_message.emit(
             f"[{self.LOG_PREFIX}] 3D 뷰어 실행: {manifest_path} ({len(layers)}개 레이어)"
+        )
+
+    def _on_viewer_process_error(self, error) -> None:
+        QMessageBox.critical(
+            self, "3D 뷰어 실행 실패",
+            f"뷰어 프로세스를 시작하지 못했습니다: {error}\n\n"
+            f"'{sys.executable}' 실행 파일 경로/권한을 확인하세요.",
+        )
+
+    def _on_viewer_process_finished(self, exit_code: int, exit_status) -> None:
+        if exit_code == 0:
+            return  # 정상 종료(사용자가 창을 닫음) - 조용히 넘어감
+        output = ""
+        if self._viewer_process is not None:
+            output = bytes(self._viewer_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        tail = output.strip()[-1500:] if output.strip() else "(출력 없음)"
+        self.log_message.emit(f"[{self.LOG_PREFIX}] 3D 뷰어가 비정상 종료됨 (exit code {exit_code})")
+        QMessageBox.critical(
+            self, "3D 뷰어 오류",
+            f"뷰어 프로세스가 오류로 종료됐습니다 (exit code {exit_code}).\n\n"
+            f"{tail}",
         )
