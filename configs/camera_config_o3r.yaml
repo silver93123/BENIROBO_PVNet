@@ -1,0 +1,35 @@
+# =============================================================================
+# Bin Picking Vision 설정 (collect_dataset.py / src.camera 공용) - ifm O3R
+# =============================================================================
+# 모든 길이 단위: mm
+# Helios/Femto Bolt용 yaml과 스키마가 다르니 섞어쓰지 않도록 주의.
+# intensity는 NORM_AMPLITUDE_IMAGE(정규화된 반사강도), XYZ는 O3R이 직접 출력.
+
+camera:
+  # 카메라 타입.
+  type: o3r
+
+  # ---- O3R 전용 옵션 ----
+  # VPU(OVP80x) IP 주소. 기본값은 ifm 공장 초기값.
+  ip: 192.168.0.69
+
+  # 3D(ToF) 카메라가 물린 포트명. 실제 배선에 맞게 지정해야 함.
+  # 포트 목록은 `ifm3d ovp8xx config get --ip=<IP>` 또는
+  # O3R(ip=...).get()의 "ports" 키에서 확인 가능 (예: port0, port2, port6).
+  port_3d: port0
+
+  # RGB(2D) 카메라 포트명. capture_rgb=True일 때만 사용.
+  # 반드시 port_3d와 같은 물리 헤드(예: O3R222/225)여야 정렬이 가능함.
+  port_2d: port2
+
+  # 연결/캡처 타임아웃 (ms)
+  connect_timeout_ms: 5000
+  capture_timeout_ms: 3000
+
+  # true로 하면 depth 격자에 정렬된 RGB도 추가로 캡처한다 (실험적 옵션).
+  # 2D-3D registration(o3r-algo-utilities 패키지 필요)을 사용하며,
+  # 실패해도(패키지 미설치, 다른 헤드의 포트 등) intensity/depth 기반
+  # 기본 파이프라인은 영향받지 않는다.
+  capture_rgb: False
+
+  valid_z_range_mm: [100.0, 1500.0]

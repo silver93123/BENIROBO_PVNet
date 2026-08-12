@@ -457,36 +457,79 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
             f"P±{params.pitch_limit_deg:.0f} Y±{params.yaw_limit_deg:.0f}deg)"
         )
 
-        results = active_tab.register(self._last_detections, ctx, params)
+        try:
+            results = active_tab.register(self._last_detections, ctx, params)
 
-        for i, (det, result) in enumerate(zip(self._last_detections, results)):
-            if result.ok:
-                init_src = "파이프라인 제공" if getattr(det, "initial_pose", None) is not None else "fallback"
-                self.log_message.emit(
-                    f"[{self.LOG_PREFIX}]  obj{i} ✓ fitness={result.fitness:.3f} (init={init_src}) "
-                    f"pick={tuple(round(v, 1) for v in result.pick_point_mm)} mm"
-                )
-            else:
-                self.log_message.emit(f"[{self.LOG_PREFIX}]  obj{i} ✗ {result.error}")
-                if result.stage_logs:
-                    for sl in result.stage_logs:
-                        voxel_str = f"{sl['voxel']}" if sl["voxel"] is not None else "원본밀도"
-                        self.log_message.emit(
-                            f"[{self.LOG_PREFIX}]     stage{sl['stage']}({sl['method']}, voxel={voxel_str}): "
-                            f"src={sl['n_src']}pt tgt={sl['n_tgt']}pt "
-                            f"fitness={sl['fitness']:.3f} rmse={sl['rmse']*1000:.2f}mm"
-                        )
+            for i, (det, result) in enumerate(zip(self._last_detections, results)):
+                if result.ok:
+                    init_src = "파이프라인 제공" if getattr(det, "initial_pose", None) is not None else "fallback"
+                    self.log_message.emit(
+                        f"[{self.LOG_PREFIX}]  obj{i} ✓ fitness={result.fitness:.3f} (init={init_src}) "
+                        f"pick={tuple(round(v, 1) for v in result.pick_point_mm)} mm"
+                    )
+                else:
+                    self.log_message.emit(f"[{self.LOG_PREFIX}]  obj{i} ✗ {result.error}")
+                    for sl in (result.stage_logs or []):
+                        self.log_message.emit(f"[{self.LOG_PREFIX}]     {self._format_stage_log(sl)}")
 
-        self._last_icp_results = results
-        self._render_result_panel(results)
-        self._update_cad_overlay(results)
-        # 2026-07 변경: 실패한 인스턴스도 이제 뷰어에 별도 색으로 표시되므로
-        # (build_scene_components의 Failed ICP Instances 레이어), 성공 여부와
-        # 무관하게 결과가 하나라도 있으면 뷰어를 열 수 있게 한다.
-        self.btn_open_viewer.setEnabled(len(results) > 0)
+            self._last_icp_results = results
+            self._render_result_panel(results)
+            self._update_cad_overlay(results)
+            # 2026-07 변경: 실패한 인스턴스도 이제 뷰어에 별도 색으로 표시되므로
+            # (build_scene_components의 Failed ICP Instances 레이어), 성공 여부와
+            # 무관하게 결과가 하나라도 있으면 뷰어를 열 수 있게 한다.
+            self.btn_open_viewer.setEnabled(len(results) > 0)
 
-        n_ok = sum(r.ok for r in results)
-        self.log_message.emit(f"[{self.LOG_PREFIX}] {active_tab.pipeline_name} ICP 완료: 성공 {n_ok}/{len(results)}")
+            n_ok = sum(r.ok for r in results)
+            self.log_message.emit(f"[{self.LOG_PREFIX}] {active_tab.pipeline_name} ICP 완료: 성공 {n_ok}/{len(results)}")
+        except Exception as exc:  # noqa: BLE001
+            # 2026-08 추가: 이전엔 이 블록 안에서 예외가 나면(예: stage_logs
+            # 항목마다 필드 구성이 달라서 dict 키 접근이 깨지는 경우) 조용히
+            # 함수가 죽어서 남은 인스턴스는 처리도 안 되고 결과 패널도 텅 빈
+            # 채로 남았다 - 사용자 입장에선 "아무 이유 없이 아무것도 안 됨"
+            # 으로 보였다. 이제 무슨 일이 있었는지 최소한 로그+팝업으로는 보인다.
+            import traceback
+            traceback.print_exc()
+            self.log_message.emit(f"[{self.LOG_PREFIX}] ⚠ ICP 처리 중 예상치 못한 오류: {exc}")
+            QMessageBox.critical(self, "ICP 처리 오류", f"ICP 정합 처리 중 오류가 발생했습니다:\n\n{exc}")
+
+    @staticmethod
+    def _format_stage_log(sl: dict) -> str:
+        """stage_logs 항목 하나를 로그 한 줄로 포맷.
+
+        표준 다단계 ICP stage(voxel/method/n_src/n_tgt/fitness/rmse 전부 있음)
+        뿐 아니라, PCA 프리스크린/포인트부족 폴백(stage/fitness/rmse만 있거나
+        stage/reason만 있음), FGR 회전-prior reject(stage/deviation_deg/
+        max_allowed_deg/method) 등 스키마가 다른 항목도 안전하게(키 없다고
+        크래시 없이) 표시한다 - 전부 .get()으로 접근하고 있는 정보만 보여준다.
+        예전엔 sl['voxel'] 같은 직접 인덱싱이라, 표준 스키마가 아닌 항목이
+        하나라도 섞이면 그 즉시 KeyError로 전체 함수가 죽었었다(그리고
+        PyQt 슬롯 안 예외는 콘솔에만 찍히고 조용히 삼켜져서, 사용자 입장에선
+        "이유 없이 나머지 인스턴스 처리가 멈춤"으로 보였다).
+        """
+        stage = sl.get("stage", "?")
+        header = f"stage{stage}"
+        if "voxel" in sl and "method" in sl:
+            voxel = sl["voxel"]
+            voxel_str = f"{voxel}" if voxel is not None else "원본밀도"
+            header = f"stage{stage}({sl['method']}, voxel={voxel_str})"
+
+        bits = []
+        if "n_src" in sl and "n_tgt" in sl:
+            bits.append(f"src={sl['n_src']}pt tgt={sl['n_tgt']}pt")
+        if "fitness" in sl:
+            bits.append(f"fitness={sl['fitness']:.3f}")
+        if sl.get("rmse") is not None:
+            bits.append(f"rmse={sl['rmse']*1000:.2f}mm")
+        if "deviation_deg" in sl:
+            bits.append(f"편차={sl['deviation_deg']:.1f}deg(허용 {sl.get('max_allowed_deg', '?')}deg)")
+        if "reason" in sl:
+            bits.append(sl["reason"])
+        if "method" in sl and "voxel" not in sl:
+            # voxel 없이 method만 있으면 그 자체가 설명 문장인 경우(FGR reject 등)
+            bits.append(str(sl["method"]))
+
+        return header + (": " + " ".join(bits) if bits else "")
 
     def _update_cad_overlay(self, results: list[ICPResult]) -> None:
         """ICP 정합이 낸 pose(4x4)로 CAD 점군을 이미지에 투영해서 반투명
@@ -601,14 +644,17 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
             layout = QVBoxLayout(card)
             layout.setContentsMargins(8, 6, 8, 6)
 
+            header_row = QHBoxLayout()
             title = QLabel(f"obj{r.instance_id}")
             title.setStyleSheet("font-weight: 600;")
-            layout.addWidget(title)
+            header_row.addWidget(title)
 
             if r.ok:
                 status = QLabel(f"fitness {r.fitness:.3f}")
                 status.setStyleSheet("color: #2a8a2a;")
-                layout.addWidget(status)
+                header_row.addWidget(status)
+                header_row.addStretch(1)
+                layout.addLayout(header_row)
                 if r.was_flipped:
                     flip_label = QLabel("뒤집힘 보정됨")
                     flip_label.setStyleSheet("color: #888; font-size: 10px;")
@@ -616,6 +662,8 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
 
                 layout.addWidget(self._build_pose_edit_row(r.instance_id))
             else:
+                header_row.addStretch(1)
+                layout.addLayout(header_row)
                 status = QLabel(r.error or "실패")
                 status.setStyleSheet("color: #c0392b;")
                 status.setWordWrap(True)
@@ -651,7 +699,6 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         pos0 = target.pick_point_mm or [0.0, 0.0, 0.0]
         euler0 = (target.pose or {}).get("euler_deg", {"roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0})
 
-        layout.addWidget(QLabel("위치 (mm, pick point)"))
         pos_row = QHBoxLayout()
         pos_spins = {}
         for axis_label, key, val in (("X", "x", pos0[0]), ("Y", "y", pos0[1]), ("Z", "z", pos0[2])):
@@ -666,7 +713,6 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
             pos_spins[key] = spin
         layout.addLayout(pos_row)
 
-        layout.addWidget(QLabel("회전 (deg)"))
         rot_row = QHBoxLayout()
         rot_spins = {}
         for axis_label, key, val in (

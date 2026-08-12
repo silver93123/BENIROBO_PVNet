@@ -83,7 +83,19 @@ def _create_base_camera(config: dict) -> CameraBase:
             capture_rgb=config.get("capture_rgb", False),
         )
 
+    if cam_type == "o3r":
+        from .ifm_o3r import O3RCamera
+        return O3RCamera(
+            ip=config.get("ip", "192.168.0.69"),
+            port_3d=config.get("port_3d", "port0"),
+            port_2d=config.get("port_2d"),
+            connect_timeout_ms=config.get("connect_timeout_ms", 5000),
+            capture_timeout_ms=config.get("capture_timeout_ms", 3000),
+            valid_z_range_mm=tuple(config.get("valid_z_range_mm", (100.0, 1500.0))),
+            capture_rgb=config.get("capture_rgb", False),
+        )
+
     raise ValueError(
         f"지원하지 않는 카메라 타입: '{cam_type}'. "
-        f"지원: ['lucid_helios', 'femto_bolt']"
+        f"지원: ['lucid_helios', 'femto_bolt', 'o3r']"
     )

@@ -37,6 +37,7 @@ DEFAULT_CAMERA_CONFIG_PATH = PROJECT_ROOT / "configs" / "camera_config.yaml"
 CAMERA_CONFIG_PATHS = {
     "lucid_helios": PROJECT_ROOT / "configs" / "camera_config_helios.yaml",
     "femto_bolt": PROJECT_ROOT / "configs" / "camera_config_femto.yaml",
+    "o3r": PROJECT_ROOT / "configs" / "camera_config_o3r.yaml",
 }
 
 # CAD 파일로 인식할 확장자. icp_workbench_base.py와 cad_model_settings_tab.py가
