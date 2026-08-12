@@ -20,10 +20,11 @@ from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from app.core import settings_manager
+from app.core.camera_config_editor import CAMERA_EXPOSURE_SCHEMA, get_current_exposure_values, save_exposure_values
 from app.core.config_patcher import find_latest_best_checkpoint
 from app.core.icp_runner import ICPParams
 from app.core.paths import CAMERA_CONFIG_PATHS
@@ -142,13 +143,22 @@ class SettingsTab(QWidget):
     def _build_camera_group(self) -> QGroupBox:
         """LiveCaptureICPTab(수동 라벨링/PVNet 라벨 생성 탭의 '촬영' 모드)이
         실제 촬영을 수행할 때마다 이 값을 다시 읽는다 - '설정' 탭이 유일한
-        편집 지점이라는 원칙은 ICP 파라미터와 동일하다."""
+        편집 지점이라는 원칙은 ICP 파라미터와 동일하다.
+
+        카메라 노출/촬영 옵션(아래쪽 스택 패널)은 다른 설정과 달리
+        app_settings.json이 아니라 카메라별 개별 yaml
+        (configs/camera_config_*.yaml)에 저장된다 - 카메라 타입을 바꾸면
+        전혀 다른 필드 집합(예: Helios의 exposure_time_selector vs
+        O3R의 exposure_long_us)이 필요하므로, CAMERA_EXPOSURE_SCHEMA를
+        기준으로 타입마다 별도 페이지를 만들고 콤보박스 선택에 따라
+        QStackedWidget으로 전환한다."""
         group = QGroupBox("카메라 (촬영 모드)")
         layout = QVBoxLayout(group)
 
         layout.addWidget(QLabel("카메라 타입"))
         self.camera_type_combo = QComboBox()
         self.camera_type_combo.addItems(list(CAMERA_CONFIG_PATHS.keys()))
+        self.camera_type_combo.currentTextChanged.connect(self._on_camera_type_changed)
         layout.addWidget(self.camera_type_combo)
 
         avg_row = QHBoxLayout()
@@ -177,7 +187,159 @@ class SettingsTab(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        # ---- 카메라별 노출/촬영 옵션 (동적 패널) ----
+        layout.addWidget(QLabel("노출/촬영 옵션 (카메라 타입별로 다름)"))
+        self.camera_exposure_stack = QStackedWidget()
+        self._camera_field_widgets: dict[str, dict[str, QWidget]] = {}
+        self._camera_page_index: dict[str, int] = {}
+
+        for cam_type in CAMERA_CONFIG_PATHS.keys():
+            page, field_widgets = self._build_camera_exposure_page(cam_type)
+            self._camera_field_widgets[cam_type] = field_widgets
+            self._camera_page_index[cam_type] = self.camera_exposure_stack.addWidget(page)
+
+        layout.addWidget(self.camera_exposure_stack)
+
+        self.btn_save_camera_exposure = QPushButton("현재 카메라 노출 설정 저장")
+        self.btn_save_camera_exposure.setToolTip(
+            "위 카메라 타입의 configs/camera_config_*.yaml에 바로 저장됩니다.\n"
+            "(아래 '저장' 버튼과는 별개 - 이 버튼을 눌러야 다음 촬영부터 반영됩니다.)"
+        )
+        self.btn_save_camera_exposure.clicked.connect(self._on_save_camera_exposure)
+        layout.addWidget(self.btn_save_camera_exposure)
+
         return group
+
+    def _build_camera_exposure_page(self, cam_type: str) -> tuple[QWidget, dict[str, QWidget]]:
+        """CAMERA_EXPOSURE_SCHEMA[cam_type]으로부터 위젯 페이지 하나를 생성.
+        스키마에 없는 타입(향후 추가되는 카메라)이면 안내 라벨만 있는 빈
+        페이지를 반환한다 - 새 카메라 추가 시 이 함수를 안 건드려도 크래시
+        나지 않게 하기 위함."""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(4, 4, 4, 4)
+
+        fields = CAMERA_EXPOSURE_SCHEMA.get(cam_type, [])
+        field_widgets: dict[str, QWidget] = {}
+
+        if not fields:
+            note = QLabel("이 카메라 타입은 설정 가능한 노출/촬영 옵션이 없습니다.")
+            note.setStyleSheet("color: #888; font-size: 10px;")
+            page_layout.addWidget(note)
+            return page, field_widgets
+
+        for field in fields:
+            row = QHBoxLayout()
+            label = QLabel(field["label"])
+            if field.get("tooltip"):
+                label.setToolTip(field["tooltip"])
+            row.addWidget(label)
+
+            widget_type = field["widget"]
+            if widget_type == "combo":
+                w = QComboBox()
+                w.addItems(field["choices"])
+            elif widget_type == "spin_int":
+                w = QSpinBox()
+                lo, hi = field["range"]
+                w.setRange(int(lo), int(hi))
+            elif widget_type == "spin_double":
+                w = QDoubleSpinBox()
+                lo, hi = field["range"]
+                w.setRange(float(lo), float(hi))
+                w.setSingleStep(field.get("step", 0.1))
+                w.setDecimals(field.get("decimals", 2))
+            elif widget_type == "checkbox":
+                w = QCheckBox()
+            elif widget_type == "line_edit":
+                w = QLineEdit()
+            else:
+                continue
+
+            if field.get("tooltip"):
+                w.setToolTip(field["tooltip"])
+
+            row.addWidget(w, stretch=1)
+            page_layout.addLayout(row)
+            field_widgets[field["key"]] = w
+
+        page_layout.addStretch(1)
+        return page, field_widgets
+
+    def _on_camera_type_changed(self, cam_type: str) -> None:
+        idx = self._camera_page_index.get(cam_type, 0)
+        self.camera_exposure_stack.setCurrentIndex(idx)
+        self._load_camera_exposure_fields(cam_type)
+
+    def _load_camera_exposure_fields(self, cam_type: str) -> None:
+        """선택된 카메라 타입의 yaml 현재값을 해당 페이지 위젯에 채운다."""
+        field_widgets = self._camera_field_widgets.get(cam_type, {})
+        if not field_widgets:
+            return
+        schema = {f["key"]: f for f in CAMERA_EXPOSURE_SCHEMA.get(cam_type, [])}
+        current = get_current_exposure_values(cam_type)
+
+        for key, widget in field_widgets.items():
+            value = current.get(key)
+            field = schema[key]
+            widget_type = field["widget"]
+
+            if widget_type == "combo":
+                idx = widget.findText(str(value)) if value is not None else -1
+                widget.setCurrentIndex(idx if idx >= 0 else 0)
+            elif widget_type == "spin_int":
+                if value is None:
+                    widget.setValue(int(field.get("null_sentinel", field["range"][0])))
+                else:
+                    widget.setValue(int(value))
+            elif widget_type == "spin_double":
+                if value is None:
+                    widget.setValue(float(field.get("null_sentinel", field["range"][0])))
+                else:
+                    widget.setValue(float(value))
+            elif widget_type == "checkbox":
+                widget.setChecked(bool(value))
+            elif widget_type == "line_edit":
+                widget.setText("" if value is None else str(value))
+
+    def _on_save_camera_exposure(self) -> None:
+        cam_type = self.camera_type_combo.currentText()
+        field_widgets = self._camera_field_widgets.get(cam_type, {})
+        if not field_widgets:
+            QMessageBox.information(self, "알림", f"'{cam_type}'은(는) 설정 가능한 노출 옵션이 없습니다.")
+            return
+
+        schema = {f["key"]: f for f in CAMERA_EXPOSURE_SCHEMA.get(cam_type, [])}
+        values: dict = {}
+        for key, widget in field_widgets.items():
+            field = schema[key]
+            widget_type = field["widget"]
+
+            if widget_type == "combo":
+                values[key] = widget.currentText()
+            elif widget_type == "spin_int":
+                v = widget.value()
+                sentinel = field.get("null_sentinel", field.get("range", (0,))[0])
+                values[key] = None if (field.get("nullable") and v == sentinel) else v
+            elif widget_type == "spin_double":
+                v = widget.value()
+                sentinel = field.get("null_sentinel", field.get("range", (0.0,))[0])
+                values[key] = None if (field.get("nullable") and v == sentinel) else v
+            elif widget_type == "checkbox":
+                values[key] = widget.isChecked()
+            elif widget_type == "line_edit":
+                text = widget.text().strip()
+                values[key] = text if text else None
+
+        try:
+            save_exposure_values(cam_type, values)
+        except Exception as e:
+            QMessageBox.warning(self, "저장 실패", f"카메라 설정 저장 중 오류가 발생했습니다:\n{e}")
+            return
+
+        now = datetime.now().strftime("%H:%M:%S")
+        self.status_label.setText(f"'{cam_type}' 카메라 노출 설정 저장됨 ({now})")
+        self.log_message.emit(f"[{self.LOG_PREFIX}] '{cam_type}' 카메라 노출 설정 저장됨: {values}")
 
     # ----------------------------------------------------------- ICP 파라미터
     def _build_icp_params_box(self) -> QGroupBox:
@@ -387,6 +549,7 @@ class SettingsTab(QWidget):
     def _load_from_settings(self) -> None:
         settings = settings_manager.load_settings()
         self._apply_dict_to_widgets(settings)
+        self._on_camera_type_changed(self.camera_type_combo.currentText())
         if settings["checkpoint_path"]:
             self.status_label.setText("저장된 설정을 불러왔습니다.")
         else:

@@ -93,6 +93,10 @@ def _create_base_camera(config: dict) -> CameraBase:
             capture_timeout_ms=config.get("capture_timeout_ms", 3000),
             valid_z_range_mm=tuple(config.get("valid_z_range_mm", (100.0, 1500.0))),
             capture_rgb=config.get("capture_rgb", False),
+            framerate=config.get("framerate"),
+            exposure_long_us=config.get("exposure_long_us"),
+            exposure_short_us=config.get("exposure_short_us"),
+            offset=config.get("offset"),
         )
 
     raise ValueError(

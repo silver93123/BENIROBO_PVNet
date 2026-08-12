@@ -30,6 +30,22 @@ camera:
   # 2D-3D registration(o3r-algo-utilities 패키지 필요)을 사용하며,
   # 실패해도(패키지 미설치, 다른 헤드의 포트 등) intensity/depth 기반
   # 기본 파이프라인은 영향받지 않는다.
-  capture_rgb: False
+  capture_rgb: false
 
   valid_z_range_mm: [100.0, 1500.0]
+
+  # ---- 노출/프레임레이트 (설정 탭에서 조정 가능) ----
+  # null이면 VPU에 이미 저장된 현재 설정을 그대로 사용한다.
+  # 값을 지정하면 open() 시점에 실제 카메라에 적용된다.
+  # 허용 범위는 헤드 모델마다 다르므로, 범위를 벗어나면 캡처 시작 시 에러가 난다
+  # (참고: python o3r_set_params.py --dry-run 으로 스키마 허용범위 확인 가능).
+  framerate:               # 예: 10.0 ~ 20.0 (0.5 단위)
+  exposure_long_us: 5000   # 마이크로초. 예: 1000
+  exposure_short_us:       # 마이크로초. 예: 100
+
+  # 측정 거리 범위 이동 (미터). null이면 카메라 현재 설정 유지.
+  # 음수 = 범위를 카메라 쪽으로 당김 (근거리 작업에 유리).
+  # 예: standard_range2m 모드에서 offset=-0.5 -> 약 0~1.58m 범위로 재배치.
+  # (범위를 넓히는 게 아니라 "재배치"하는 것이라 반대쪽 끝은 좁아짐 - 실제
+  # 작업 거리에서 유효 픽셀이 잘 잡히는지 depth map으로 확인 권장)
+  offset: -1.0

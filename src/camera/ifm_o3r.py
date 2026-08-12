@@ -87,6 +87,13 @@ class O3RCamera(CameraBase):
         capture_rgb: True면 depth 격자에 정렬된 RGB도 추가로 캡처한다 (실험적,
             기본값 False). port_2d가 3D와 같은 헤드가 아니거나
             o3r-algo-utilities가 없으면 자동으로 비활성화되고 경고만 남긴다.
+        framerate / exposure_long_us / exposure_short_us / offset:
+            None(기본값)이면 VPU에 이미 저장된 현재 설정을 그대로 사용한다.
+            값을 지정하면 open() 시점에 ports.<port_3d>.acquisition에 밀어넣는다
+            (Helios 드라이버가 ExposureTimeSelector를 open()에서 nodemap에
+            쓰는 것과 동일한 패턴). 허용 범위는 헤드 모델마다 달라 스키마로
+            내부 검증하며, 범위를 벗어나면 ifm3dpy가 에러를 던진다.
+            offset은 측정 거리 범위를 이동시킨다 (미터, 음수=카메라 쪽으로 당김).
     """
 
     def __init__(
@@ -98,6 +105,10 @@ class O3RCamera(CameraBase):
         capture_timeout_ms: int = 3000,
         valid_z_range_mm: tuple = (100.0, 1500.0),
         capture_rgb: bool = False,
+        framerate: Optional[float] = None,
+        exposure_long_us: Optional[int] = None,
+        exposure_short_us: Optional[int] = None,
+        offset: Optional[float] = None,
     ) -> None:
         if not _IFM3D_AVAILABLE:
             raise ImportError(
@@ -113,6 +124,10 @@ class O3RCamera(CameraBase):
         self._valid_z_min = float(valid_z_range_mm[0])
         self._valid_z_max = float(valid_z_range_mm[1])
         self.capture_rgb = bool(capture_rgb)
+        self.framerate = framerate
+        self.exposure_long_us = exposure_long_us
+        self.exposure_short_us = exposure_short_us
+        self.offset = offset
 
         if self.capture_rgb and not self.port_2d:
             logger.warning("capture_rgb=True인데 port_2d가 지정되지 않아 RGB 없이 진행합니다.")
@@ -147,6 +162,8 @@ class O3RCamera(CameraBase):
                 logger.warning("2D/3D 헤드 검증 실패 - RGB 없이 진행합니다: %s", e)
                 self.capture_rgb = False
 
+        self._push_acquisition_params()
+
         self._fg_3d = FrameGrabber(self._o3r, self._o3r.port(self.port_3d).pcic_port)
         buffers_3d = [buffer_id.RADIAL_DISTANCE_IMAGE, buffer_id.NORM_AMPLITUDE_IMAGE, buffer_id.CONFIDENCE_IMAGE]
         if self.capture_rgb:
@@ -175,6 +192,34 @@ class O3RCamera(CameraBase):
                 f"'{port2d}'와 '{port3d}'는 서로 다른 카메라 헤드입니다 "
                 f"(2D-3D registration은 같은 헤드에서만 가능)."
             )
+
+    def _push_acquisition_params(self) -> None:
+        """framerate/exposure가 지정된 것만 골라 ports.<port_3d>.acquisition에 반영.
+        Helios 드라이버가 ExposureTimeSelector를 open()에서 nodemap에 쓰는 것과
+        동일한 패턴 - '설정 탭에서 조정한 값이 다음 촬영부터 실제로 적용된다'는
+        원칙을 카메라 종류와 무관하게 유지하기 위함. 값이 하나도 없으면 아무
+        것도 하지 않고 VPU에 이미 저장된 현재 설정을 그대로 쓴다."""
+        acquisition = {}
+        if self.framerate is not None:
+            acquisition["framerate"] = float(self.framerate)
+        if self.exposure_long_us is not None:
+            acquisition["exposureLong"] = int(self.exposure_long_us)
+        if self.exposure_short_us is not None:
+            acquisition["exposureShort"] = int(self.exposure_short_us)
+        if self.offset is not None:
+            acquisition["offset"] = float(self.offset)
+
+        if not acquisition:
+            return
+
+        try:
+            self._o3r.set({"ports": {self.port_3d: {"acquisition": acquisition}}})
+            logger.info("acquisition 파라미터 적용됨 (port=%s): %s", self.port_3d, acquisition)
+        except Exception as e:
+            raise RuntimeError(
+                f"acquisition 파라미터 적용 실패 (port={self.port_3d}, 값={acquisition}). "
+                f"헤드 모델의 허용 범위를 벗어났을 수 있습니다. 원본 에러: {e}"
+            ) from e
 
     # ----------------------------------------------------------------- close
     def close(self) -> None:
