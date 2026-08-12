@@ -31,3 +31,54 @@ camera:
   capture_rgb: true
 
   valid_z_range_mm: [100.0, 1500.0]
+
+  # ---------------------------------------------------------------------
+  # 디바이스 프로퍼티 (선택). 여기 값을 바꾸면 open() 시 자동 적용됩니다 -
+  # 코드를 다시 건드릴 필요 없습니다.
+  #
+  # femto_bolt.py 상단 주석의 "자동 노출만 지원"은 이 실기(S/N 확인 완료)에서
+  # femto_bolt_property_util.py로 실측한 결과와 다릅니다 - 실제로는 컬러/뎁스/IR
+  # 노출값까지 수동 조정이 가능했습니다. 아래는 그 실측([지원 O]) 결과만 담았고,
+  # 미지원 프로퍼티는 넣어도 경고 로그만 남기고 무시되므로(카메라 연결 자체는
+  # 안전) 다른 프로퍼티를 추가로 시도해봐도 괜찮습니다.
+  #
+  # 프로퍼티 이름 = pyorbbecsdk의 OBPropertyID 멤버명과 동일해야 합니다.
+  # 접미사로 값 타입을 판별합니다: _BOOL -> true/false, _INT -> 정수,
+  # _FLOAT -> 실수.
+  # ---------------------------------------------------------------------
+  device_properties:
+    color:
+      OB_PROP_COLOR_AUTO_EXPOSURE_BOOL: true
+      # 수동 노출을 쓰려면 위를 false로 바꾸고 아래 EXPOSURE/GAIN을 원하는 값으로.
+      OB_PROP_COLOR_EXPOSURE_INT: 200
+      OB_PROP_COLOR_GAIN_INT: 0
+      OB_PROP_COLOR_AUTO_WHITE_BALANCE_BOOL: true
+      OB_PROP_COLOR_WHITE_BALANCE_INT: 6500
+      OB_PROP_COLOR_BRIGHTNESS_INT: 10
+      OB_PROP_COLOR_CONTRAST_INT: 50
+      OB_PROP_COLOR_SATURATION_INT: 64
+      OB_PROP_COLOR_SHARPNESS_INT: 24
+      OB_PROP_COLOR_POWER_LINE_FREQUENCY_INT: 2   # 0:off 1:50Hz 2:60Hz
+      OB_PROP_COLOR_MIRROR_BOOL: false
+      OB_PROP_COLOR_FLIP_BOOL: false
+      OB_PROP_COLOR_ROTATE_INT: 0                 # 0/90/180/270
+      OB_PROP_COLOR_HDR_BOOL: false
+
+    depth:
+      OB_PROP_DEPTH_EXPOSURE_INT: 125
+      OB_PROP_DEPTH_MIRROR_BOOL: false
+      OB_PROP_DEPTH_FLIP_BOOL: false
+      OB_PROP_DEPTH_ROTATE_INT: 0
+      OB_PROP_DEPTH_SOFT_FILTER_BOOL: false
+      OB_PROP_DEPTH_NOISE_REMOVAL_FILTER_BOOL: false
+      OB_PROP_DEPTH_NOISE_REMOVAL_FILTER_MAX_DIFF_INT: 10
+      OB_PROP_DEPTH_NOISE_REMOVAL_FILTER_MAX_SPECKLE_SIZE_INT: 50
+
+    ir:
+      OB_PROP_IR_EXPOSURE_INT: 125
+      OB_PROP_IR_MIRROR_BOOL: false
+      OB_PROP_IR_FLIP_BOOL: false
+      OB_PROP_IR_ROTATE_INT: 0
+
+    device:
+      OB_PROP_INDICATOR_LIGHT_BOOL: true

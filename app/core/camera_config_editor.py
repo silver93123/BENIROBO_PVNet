@@ -28,6 +28,29 @@ _yaml.preserve_quotes = True
 _yaml.indent(mapping=2, sequence=4, offset=2)
 
 
+def _get_nested(d: dict, dotted_key: str) -> Any:
+    """'a.b.c' 형태의 키로 중첩 dict를 조회. 중간 경로가 없으면 None."""
+    cur = d
+    for part in dotted_key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _set_nested(d: dict, dotted_key: str, value: Any) -> None:
+    """'a.b.c' 형태의 키로 중첩 dict에 값을 설정. 중간 dict가 없으면 만든다."""
+    parts = dotted_key.split(".")
+    cur = d
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
 # 필드 하나의 정의:
 #   key: yaml/드라이버 kwarg 키
 #   label: UI 라벨
@@ -59,10 +82,64 @@ CAMERA_EXPOSURE_SCHEMA: dict[str, list[dict[str, Any]]] = {
         {
             "key": "fps",
             "label": "FPS",
+            "widget": "combo",
+            "choices": ["5", "15", "30"],
+            "tooltip": "Femto Bolt(Azure Kinect ToF 계열)는 depth/IR 스트림 fps로 5/15/30만 "
+                       "지원합니다. 그 외 값(예: 8)을 넣으면 촬영 시 'Invalid input, "
+                       "No matched video stream profile found!' 오류가 납니다. "
+                       "해상도를 바꿨다면 scripts/list_femto_profiles.py로 실제 지원 조합을 "
+                       "먼저 확인하세요.",
+        },
+        {
+            "key": "device_properties.color.OB_PROP_COLOR_AUTO_EXPOSURE_BOOL",
+            "label": "컬러 자동노출",
+            "widget": "checkbox",
+            "tooltip": "끄면 아래 '컬러 노출값'을 수동으로 조정할 수 있습니다. "
+                       "femto_bolt_property_util.py --list 실측 결과 이 기기는 수동 노출을 지원합니다.",
+        },
+        {
+            "key": "device_properties.color.OB_PROP_COLOR_EXPOSURE_INT",
+            "label": "컬러 노출값",
             "widget": "spin_int",
-            "range": (5, 30),
-            "tooltip": "Femto Bolt는 자동 노출만 지원합니다 (직접 노출 시간 조정 불가). "
-                       "FPS를 낮추면 프레임당 노출 여유가 늘어나는 간접 효과가 있습니다.",
+            "range": (0, 2000),
+            "tooltip": "'컬러 자동노출'이 꺼져 있을 때만 적용됩니다. 어두우면 늘리고, "
+                       "포화되면 줄이세요. 기기가 실제로 허용하는 범위를 벗어난 값은 "
+                       "적용 시 경고 로그만 남고 무시됩니다.",
+        },
+        {
+            "key": "device_properties.color.OB_PROP_COLOR_GAIN_INT",
+            "label": "컬러 게인",
+            "widget": "spin_int",
+            "range": (0, 255),
+            "tooltip": "게인을 올리면 밝아지지만 노이즈도 늘어납니다.",
+        },
+        {
+            "key": "device_properties.color.OB_PROP_COLOR_AUTO_WHITE_BALANCE_BOOL",
+            "label": "컬러 자동 화이트밸런스",
+            "widget": "checkbox",
+            "tooltip": "끄면 아래 '화이트밸런스(K)'를 수동으로 고정할 수 있습니다. "
+                       "조명이 일정한 작업장이라면 꺼서 고정하는 편이 색상이 안정적입니다.",
+        },
+        {
+            "key": "device_properties.color.OB_PROP_COLOR_WHITE_BALANCE_INT",
+            "label": "화이트밸런스 (K)",
+            "widget": "spin_int",
+            "range": (2000, 10000),
+            "tooltip": "'컬러 자동 화이트밸런스'가 꺼져 있을 때만 적용됩니다. 색온도(캘빈).",
+        },
+        {
+            "key": "device_properties.depth.OB_PROP_DEPTH_EXPOSURE_INT",
+            "label": "Depth 노출값",
+            "widget": "spin_int",
+            "range": (0, 2000),
+            "tooltip": "Depth 센서 노출값. 반사가 강한 금속 부품 등에서 포화가 의심되면 줄여보세요.",
+        },
+        {
+            "key": "device_properties.ir.OB_PROP_IR_EXPOSURE_INT",
+            "label": "IR 노출값",
+            "widget": "spin_int",
+            "range": (0, 2000),
+            "tooltip": "IR 스트림(=intensity 입력) 노출값. RTMDet-Ins 입력 화질에 직접 영향을 줍니다.",
         },
     ],
     "o3r": [
@@ -143,7 +220,9 @@ def load_camera_yaml(camera_type: str):
 
 def get_current_exposure_values(camera_type: str) -> dict[str, Any]:
     """스키마에 정의된 필드들의 현재 yaml 값을 dict로 반환.
-    yaml 자체가 없거나 필드가 없으면 빈 값(None/기본)으로 채운다."""
+    yaml 자체가 없거나 필드가 없으면 빈 값(None/기본)으로 채운다.
+    key는 'device_properties.color.OB_PROP_...'처럼 점(.)으로 중첩 경로를
+    표현할 수 있다 (예전처럼 점이 없는 단순 키도 그대로 동작)."""
     schema = CAMERA_EXPOSURE_SCHEMA.get(camera_type, [])
     doc = load_camera_yaml(camera_type)
     cam_section = (doc or {}).get("camera", {}) if doc else {}
@@ -151,12 +230,13 @@ def get_current_exposure_values(camera_type: str) -> dict[str, Any]:
     values = {}
     for field in schema:
         key = field["key"]
-        values[key] = cam_section.get(key)
+        values[key] = _get_nested(cam_section, key)
     return values
 
 
 def save_exposure_values(camera_type: str, values: dict[str, Any]) -> None:
-    """UI에서 편집한 값들을 해당 카메라 yaml에 반영 (주석/포맷 보존)."""
+    """UI에서 편집한 값들을 해당 카메라 yaml에 반영 (주석/포맷 보존).
+    key는 get_current_exposure_values와 동일하게 점(.) 중첩 경로를 지원한다."""
     path = CAMERA_CONFIG_PATHS.get(camera_type)
     if path is None:
         raise ValueError(f"알 수 없는 카메라 타입: {camera_type}")
@@ -171,7 +251,7 @@ def save_exposure_values(camera_type: str, values: dict[str, Any]) -> None:
         raise ValueError(f"{path}에 'camera' 섹션이 없습니다.")
 
     for key, value in values.items():
-        doc["camera"][key] = value
+        _set_nested(doc["camera"], key, value)
 
     with open(path, "w", encoding="utf-8") as f:
         _yaml.dump(doc, f)

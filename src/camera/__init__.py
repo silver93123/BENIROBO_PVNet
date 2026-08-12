@@ -81,6 +81,7 @@ def _create_base_camera(config: dict) -> CameraBase:
             valid_z_range_mm=tuple(config.get("valid_z_range_mm", (100.0, 1500.0))),
             warmup_frames=config.get("warmup_frames", 5),
             capture_rgb=config.get("capture_rgb", False),
+            device_properties=config.get("device_properties"),
         )
 
     if cam_type == "o3r":

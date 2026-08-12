@@ -51,6 +51,7 @@ try:
         Config,
         OBError,
         OBFormat,
+        OBPropertyID,
         OBSensorType,
         OBStreamType,
         Pipeline,
@@ -86,6 +87,14 @@ class FemtoBoltCamera(CameraBase):
             기본값 False). IR/depth 기반 검증된 파이프라인과는 완전히 분리되어
             있어서, 이 옵션이 실패해도(스트림 미지원, AlignFilter 실패 등)
             capture()는 color_rgb=None으로 정상 반환하며 크래시하지 않는다.
+        device_properties: {카테고리: {OBPropertyID 이름: 값}} 형태의 dict
+            (configs/camera_config_femto.yaml의 camera.device_properties 섹션이
+            그대로 들어온다). open()에서 pipeline.start() 직후 순서대로 적용된다.
+            프로퍼티 이름은 pyorbbecsdk의 OBPropertyID 멤버명과 동일해야 하며,
+            접미사(_BOOL/_INT/_FLOAT)로 타입을 판별해 set_bool_property /
+            set_int_property / set_float_property 중 알맞은 것을 호출한다.
+            이 기기/SDK에서 미지원인 프로퍼티는 OBError를 잡아 경고 로그만
+            남기고 건너뛰므로, 한 항목이 실패해도 카메라 연결 자체는 안전하다.
     """
 
     def __init__(
@@ -98,6 +107,7 @@ class FemtoBoltCamera(CameraBase):
         valid_z_range_mm: tuple = (100.0, 1500.0),
         warmup_frames: int = 5,
         capture_rgb: bool = False,
+        device_properties: Optional[dict] = None,
     ) -> None:
         if not _ORBBEC_AVAILABLE:
             raise ImportError(
@@ -117,6 +127,7 @@ class FemtoBoltCamera(CameraBase):
         self._valid_z_max = float(valid_z_range_mm[1])
         self.warmup_frames = int(warmup_frames)
         self.capture_rgb = bool(capture_rgb)
+        self.device_properties = device_properties or {}
 
         self._pipeline: Optional["Pipeline"] = None
         self._pc_filter: Optional["PointCloudFilter"] = None
@@ -152,16 +163,16 @@ class FemtoBoltCamera(CameraBase):
         depth_profiles = self._pipeline.get_stream_profile_list(
             OBSensorType.DEPTH_SENSOR
         )
-        depth_profile = depth_profiles.get_video_stream_profile(
-            self.depth_width, self.depth_height, OBFormat.Y16, self.fps
+        depth_profile = self._resolve_video_profile(
+            depth_profiles, self.depth_width, self.depth_height, OBFormat.Y16, self.fps, "Depth",
         )
         config.enable_stream(depth_profile)
 
         ir_profiles = self._pipeline.get_stream_profile_list(
             OBSensorType.IR_SENSOR
         )
-        ir_profile = ir_profiles.get_video_stream_profile(
-            self.depth_width, self.depth_height, OBFormat.Y16, self.fps
+        ir_profile = self._resolve_video_profile(
+            ir_profiles, self.depth_width, self.depth_height, OBFormat.Y16, self.fps, "IR",
         )
         config.enable_stream(ir_profile)
 
@@ -197,6 +208,9 @@ class FemtoBoltCamera(CameraBase):
 
         self._pipeline.start(config)
 
+        if self.device_properties:
+            self._apply_device_properties()
+
         self._pc_filter = PointCloudFilter()
         self._pc_filter.set_create_point_format(OBFormat.POINT)
 
@@ -216,6 +230,40 @@ class FemtoBoltCamera(CameraBase):
             except OBError:
                 pass
         time.sleep(0.1)
+
+    # ---------------------------------------------------- profile resolution
+    def _resolve_video_profile(self, profile_list, width: int, height: int, fmt, fps: int, label: str):
+        """요청한 (width, height, format, fps) 조합의 스트림 프로파일을 찾는다.
+
+        pyorbbecsdk가 기본으로 던지는 'Invalid input, No matched video stream
+        profile found!' 메시지는 이 기기가 실제로 어떤 조합을 지원하는지 알려주지
+        않아 원인 파악이 어렵다 (실사례: fps=8을 지원 안 하는데 이 메시지만
+        보고는 해상도 문제인지 fps 문제인지 알 수 없었음). 여기서는 실패 시
+        이 기기가 실제로 지원하는 전체 프로파일 목록을 함께 보여준다.
+        """
+        try:
+            return profile_list.get_video_stream_profile(width, height, fmt, fps)
+        except OBError as e:
+            available = []
+            try:
+                for i in range(profile_list.get_count()):
+                    p = profile_list.get_stream_profile_by_index(i)
+                    available.append(
+                        f"{p.get_width()}x{p.get_height()}@{p.get_fps()}fps({p.get_format()})"
+                    )
+            except Exception:
+                pass
+            hint = (
+                "\n".join(f"  - {a}" for a in sorted(set(available)))
+                if available else "  (지원 목록을 가져오지 못함 - scripts/list_femto_profiles.py로 직접 확인하세요)"
+            )
+            raise RuntimeError(
+                f"{label} 스트림 프로파일 {width}x{height}@{fps}fps 을(를) 이 기기가 지원하지 않습니다.\n"
+                f"원본 오류: {e}\n"
+                f"이 기기가 실제로 지원하는 {label} 프로파일:\n{hint}\n"
+                f"configs/camera_config_femto.yaml의 depth_width/depth_height/fps 값을 "
+                f"위 목록에 있는 조합으로 맞추세요."
+            ) from e
 
     # ----------------------------------------------------------------- close
     def close(self) -> None:
@@ -323,6 +371,57 @@ class FemtoBoltCamera(CameraBase):
         except Exception as e:
             logger.warning("RGB 정렬/추출 실패 (IR/depth 결과에는 영향 없음): %s", e)
             return None
+
+    # --------------------------------------------------- device_properties
+    def _apply_device_properties(self) -> None:
+        """configs/camera_config_femto.yaml의 camera.device_properties 섹션을
+        디바이스에 적용한다. 카테고리(color/depth/ir/device 등)는 로그 태그로만
+        쓰이고 실제로는 순서대로 모두 적용한다. 개별 프로퍼티가 이 기기/SDK에서
+        미지원이거나 값 범위를 벗어나면 OBError를 잡아 경고만 남기고 계속
+        진행한다 (한 항목 실패로 카메라 연결 전체가 실패하지 않도록)."""
+        device = self._pipeline.get_device()
+        for category, props in self.device_properties.items():
+            if not props:
+                continue
+            for name, value in props.items():
+                prop_id = getattr(OBPropertyID, name, None)
+                if prop_id is None:
+                    logger.warning(
+                        "[device_properties][%s] %s: 이 SDK 버전에 없는 프로퍼티입니다. 건너뜁니다.",
+                        category, name,
+                    )
+                    continue
+                ptype = self._property_type_from_name(name)
+                if ptype is None:
+                    logger.warning(
+                        "[device_properties][%s] %s: 이름 접미사(_BOOL/_INT/_FLOAT)로 "
+                        "타입을 판별할 수 없어 건너뜁니다.",
+                        category, name,
+                    )
+                    continue
+                try:
+                    if ptype == "bool":
+                        device.set_bool_property(prop_id, bool(value))
+                    elif ptype == "int":
+                        device.set_int_property(prop_id, int(value))
+                    elif ptype == "float":
+                        device.set_float_property(prop_id, float(value))
+                    logger.info("[device_properties][%s] %s = %s 적용 완료", category, name, value)
+                except OBError as e:
+                    logger.warning(
+                        "[device_properties][%s] %s 설정 실패 (미지원이거나 범위를 벗어남): %s",
+                        category, name, e,
+                    )
+
+    @staticmethod
+    def _property_type_from_name(name: str) -> Optional[str]:
+        if name.endswith("_BOOL"):
+            return "bool"
+        if name.endswith("_INT"):
+            return "int"
+        if name.endswith("_FLOAT"):
+            return "float"
+        return None
 
     @staticmethod
     def _normalize_intensity(intensity_u16: np.ndarray) -> np.ndarray:

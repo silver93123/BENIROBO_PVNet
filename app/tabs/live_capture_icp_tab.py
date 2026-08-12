@@ -108,11 +108,11 @@ class LiveCaptureICPTab(ICPWorkbenchTab):
         self.capture_list.currentRowChanged.connect(self._on_capture_row_changed)
         layout.addWidget(self.capture_list, stretch=1)
 
-        self.btn_save_session = QPushButton("세션으로 저장")
+        self.btn_save_session = QPushButton("세션으로 저장 (이력 전체)")
         self.btn_save_session.setToolTip(
-            "현재 촬영본을 data/dataset/ 밑에 표준 세션 폴더로 저장 - "
+            "이력 목록에 있는 '촬영' 프레임 전부를 data/dataset/ 밑에 세션 폴더 하나로 저장합니다 - "
             "이후 '이미지 불러오기' 모드나 학습 파이프라인에서 재사용 가능\n"
-            "(이미 세션 폴더에서 불러온 프레임은 다시 저장할 필요가 없어 비활성화됩니다.)"
+            "(이미 세션 폴더에서 불러온 프레임(kind=session)은 이미 디스크에 있으므로 제외됩니다.)"
         )
         self.btn_save_session.clicked.connect(self._on_save_as_session)
         self.btn_save_session.setEnabled(False)
@@ -134,6 +134,21 @@ class LiveCaptureICPTab(ICPWorkbenchTab):
         btn_open_settings_cam = QPushButton("카메라 설정 열기")
         btn_open_settings_cam.clicked.connect(self.open_settings_requested.emit)
         layout.addWidget(btn_open_settings_cam)
+
+        display_mode_row = QHBoxLayout()
+        display_mode_row.addWidget(QLabel("표시/검출 이미지"))
+        self.display_mode_combo = QComboBox()
+        self.display_mode_combo.addItems(["Intensity (그레이)", "RGB (컬러)"])
+        self.display_mode_combo.setToolTip(
+            "촬영 시 뷰어에 표시하고 이후 '2D 검출 실행'에도 그대로 쓰일 이미지를 고릅니다.\n"
+            "RGB는 카메라 설정(yaml)의 capture_rgb가 켜져 있고, 이 카메라 타입이 RGB 정렬 캡처를\n"
+            "지원할 때만 됩니다 - 지원 안 되면 자동으로 Intensity로 대체되고 로그에 안내가 뜹니다.\n"
+            "주의: RTMDet-Ins 체크포인트는 보통 Intensity(그레이 3채널 복제) 이미지로 학습되어\n"
+            "있으므로, RGB로 '2D 검출'을 돌리면 도메인이 달라져 검출 정확도가 떨어질 수 있습니다 -\n"
+            "라벨 저장용 촬영은 Intensity를 권장하고, RGB는 육안 확인/디버깅 용도로 쓰세요."
+        )
+        display_mode_row.addWidget(self.display_mode_combo, stretch=1)
+        layout.addLayout(display_mode_row)
 
         self.btn_capture = QPushButton("촬영")
         self.btn_capture.clicked.connect(self._on_capture)
@@ -233,9 +248,30 @@ class LiveCaptureICPTab(ICPWorkbenchTab):
         finally:
             self.btn_capture.setEnabled(True)
 
-        label = datetime.now().strftime("capture_%H%M%S")
+        # 표시/검출 이미지 모드 결정: RGB가 선택됐어도 이 프레임에
+        # color_rgb가 없으면(카메라 설정 capture_rgb=false, 또는 이 카메라
+        # 타입이 RGB 정렬 캡처 자체를 지원 안 함, 또는 정렬 실패) Intensity로
+        # 자동 대체한다 - FrameData.color_rgb가 항상 optional인 것과 동일한
+        # "실패해도 크래시하지 않는다" 원칙을 UI 레벨에서도 지킨다.
+        want_rgb = self.display_mode_combo.currentIndex() == 1
+        mode_tag = "ir"
+        image_bgr = frame.intensity
+        if want_rgb:
+            if frame.color_rgb is not None:
+                # FrameData.color_rgb는 RGB 채널 순서(base.py 문서 기준) - cv2.imwrite는
+                # BGR을 기대하므로 반드시 변환해야 색이 뒤집히지 않는다.
+                image_bgr = cv2.cvtColor(frame.color_rgb, cv2.COLOR_RGB2BGR)
+                mode_tag = "rgb"
+            else:
+                self.log_message.emit(
+                    f"[{self.LOG_PREFIX}] RGB 모드가 선택됐지만 이 프레임에 color_rgb가 없습니다 "
+                    "(카메라 설정의 capture_rgb가 꺼져 있거나, 이 카메라 타입이 RGB 정렬 캡처를 "
+                    "지원하지 않거나, 정렬에 실패했습니다). Intensity로 대체합니다."
+                )
+
+        label = datetime.now().strftime(f"capture_%H%M%S_{mode_tag}")
         tmp_path = Path(tempfile.gettempdir()) / f"tcp_{label}.png"
-        cv2.imwrite(str(tmp_path), frame.intensity)
+        cv2.imwrite(str(tmp_path), image_bgr)
 
         self._frame_entries[label] = _FrameEntry(
             kind="capture",
@@ -320,9 +356,16 @@ class LiveCaptureICPTab(ICPWorkbenchTab):
             self.capture_list.setCurrentRow(self.capture_list.count() - 1)
 
     # ------------------------------------------------------------- 프레임 선택
+    def _any_capturable_frames(self) -> bool:
+        """이력 목록에 '촬영'(kind=capture) 프레임이 하나라도 있는지.
+        '세션으로 저장 (이력 전체)' 버튼은 현재 선택된 행이 아니라 이 조건으로
+        활성화한다 - 지금 보고 있는 프레임이 session-load든 capture든 상관없이,
+        목록 어딘가에 아직 저장 안 된 촬영본이 있으면 눌러서 전부 저장할 수 있어야 하기 때문."""
+        return any(e.kind == "capture" for e in self._frame_entries.values())
+
     def _on_capture_row_changed(self, row: int) -> None:
         if row < 0:
-            self.btn_save_session.setEnabled(False)
+            self.btn_save_session.setEnabled(self._any_capturable_frames())
             return
         label = self.capture_list.item(row).text()
         entry = self._frame_entries[label]
@@ -332,7 +375,6 @@ class LiveCaptureICPTab(ICPWorkbenchTab):
             self._pcd_organized = entry.pcd_organized
             self._valid_mask = entry.valid_mask
             self._pcd_std = entry.pcd_std
-            self.btn_save_session.setEnabled(True)
         else:  # "session" - 디스크에서 지금 읽는다 (스캔 시점엔 안 읽음)
             image_path = entry.session_dir / "intensity" / f"{entry.frame_name}.png"
             try:
@@ -340,41 +382,61 @@ class LiveCaptureICPTab(ICPWorkbenchTab):
                 valid_mask = np.load(entry.session_dir / "valid_mask" / f"{entry.frame_name}.npy")
             except OSError as exc:
                 QMessageBox.critical(self, "불러오기 오류", f"프레임을 읽을 수 없습니다: {exc}")
-                self.btn_save_session.setEnabled(False)
+                self.btn_save_session.setEnabled(self._any_capturable_frames())
                 return
             self._current_image_path = str(image_path)
             self._pcd_organized = pcd_organized
             self._valid_mask = valid_mask
             self._pcd_std = None
-            # 이미 세션 폴더에 있는 프레임이라 다시 저장할 필요가 없음.
-            self.btn_save_session.setEnabled(False)
 
+        self.btn_save_session.setEnabled(self._any_capturable_frames())
         self._on_new_frame_acquired(label)
 
     # -------------------------------------------------------------- 세션 저장
     def _on_save_as_session(self) -> None:
-        row = self.capture_list.currentRow()
-        if row < 0:
+        """이력 목록에 있는 '촬영'(kind=capture) 프레임 전부를 세션 폴더
+        하나에 저장한다 (2026-08 개편 - 이전에는 현재 선택된 프레임 1개만
+        저장됐음). '이미지 불러오기'로 이미 세션에서 불러온 프레임
+        (kind=session)은 이미 디스크에 있으므로 다시 저장하지 않는다.
+
+        cv2.IMREAD_UNCHANGED로 읽는 이유: 이전에는 IMREAD_GRAYSCALE로 강제
+        변환해서 'RGB (컬러)' 모드로 찍은 프레임까지 흑백으로 저장되는
+        문제가 있었다. UNCHANGED로 읽으면 Intensity 모드(원래 1채널 그레이
+        PNG)는 그대로, RGB 모드(3채널 컬러 PNG)는 색이 보존된 채로 저장된다.
+        """
+        capturable = [
+            (self.capture_list.item(i).text(), self._frame_entries[self.capture_list.item(i).text()])
+            for i in range(self.capture_list.count())
+            if self._frame_entries[self.capture_list.item(i).text()].kind == "capture"
+        ]
+        if not capturable:
+            QMessageBox.information(self, "저장할 프레임 없음", "먼저 '촬영'으로 프레임을 하나 이상 찍으세요.")
             return
-        label = self.capture_list.item(row).text()
-        entry = self._frame_entries[label]
-        if entry.kind != "capture":
-            return  # 이미 세션 폴더에서 온 프레임 - 버튼이 비활성화돼 있어야 하지만 방어적으로 한 번 더 체크
 
         session_name = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = DEFAULT_DATASET_ROOT / session_name
         for sub in ("intensity", "pointcloud_organized", "valid_mask"):
             (session_dir / sub).mkdir(parents=True, exist_ok=True)
 
-        frame_name = "frame_0000"
-        image = cv2.imread(entry.image_path, cv2.IMREAD_GRAYSCALE)
-        cv2.imwrite(str(session_dir / "intensity" / f"{frame_name}.png"), image)
-        np.save(session_dir / "pointcloud_organized" / f"{frame_name}.npy", entry.pcd_organized)
-        np.save(session_dir / "valid_mask" / f"{frame_name}.npy", entry.valid_mask)
+        n_saved = 0
+        for i, (label, entry) in enumerate(capturable):
+            frame_name = f"frame_{i:04d}"
+            image = cv2.imread(entry.image_path, cv2.IMREAD_UNCHANGED)
+            if image is None:
+                self.log_message.emit(
+                    f"[{self.LOG_PREFIX}] {label}: 이미지 파일을 읽지 못해 건너뜁니다 ({entry.image_path})"
+                )
+                continue
+            cv2.imwrite(str(session_dir / "intensity" / f"{frame_name}.png"), image)
+            np.save(session_dir / "pointcloud_organized" / f"{frame_name}.npy", entry.pcd_organized)
+            np.save(session_dir / "valid_mask" / f"{frame_name}.npy", entry.valid_mask)
+            n_saved += 1
 
-        self.log_message.emit(f"[{self.LOG_PREFIX}] 세션으로 저장 완료: {session_dir}")
+        self.log_message.emit(
+            f"[{self.LOG_PREFIX}] 세션으로 저장 완료: {session_dir} ({n_saved}/{len(capturable)}개 프레임)"
+        )
         QMessageBox.information(
             self, "저장 완료",
-            f"세션 폴더로 저장했습니다:\n{session_dir}\n\n"
+            f"세션 폴더로 저장했습니다 ({n_saved}개 프레임):\n{session_dir}\n\n"
             "'이미지 불러오기' 모드에서 이 폴더를 그대로 불러올 수 있습니다.",
         )
