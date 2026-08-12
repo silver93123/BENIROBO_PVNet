@@ -10,7 +10,7 @@ camera:
   type: femto_bolt
 
   # 시리얼 번호. null이면 첫 번째로 발견되는 카메라를 사용한다.
-  serial: null
+  serial:
 
   # ---- Femto Bolt 전용 옵션 ----
   # depth/IR 스트림 해상도 (반드시 서로 같아야 픽셀 정렬 유지됨).
@@ -28,6 +28,6 @@ camera:
   # IR/depth 기반 기본 파이프라인과는 분리되어 있어, 이 옵션이 실패해도
   # IR/depth 캡처 자체는 영향받지 않는다. "0. 데이터 수집" 탭에서
   # "RGB PNG (Femto Bolt 전용)" 체크박스도 같이 켜야 실제로 저장된다.
-  capture_rgb: True
+  capture_rgb: true
 
   valid_z_range_mm: [100.0, 1500.0]
