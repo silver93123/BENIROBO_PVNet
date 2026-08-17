@@ -1,11 +1,16 @@
-"""이미지 위에 검출 박스 + 마스크 오버레이 + (선택) pose 미리보기 오버레이를 보여주는 위젯."""
+"""이미지 위에 검출 박스 + 마스크 오버레이 + (선택) pose 미리보기 오버레이를 보여주는 위젯.
+
+확대/축소(줌)와 ROI(검출 대상 영역) 지정 기능도 여기서 담당한다. 두 기능 다
+"원본 이미지 픽셀 좌표"를 기준으로 상태를 저장한다 - 화면에 보이는 크기(줌
+배율)가 바뀌어도 좌표 자체는 안 흔들리게 하기 위함이다.
+"""
 from __future__ import annotations
 
 import math
 
 import numpy as np
-from PyQt6.QtCore import Qt, QRectF, QPointF
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QImage, QPolygonF
+from PyQt6.QtCore import Qt, QRectF, QPointF, QPoint, pyqtSignal
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QImage, QPolygonF, QCursor
 from PyQt6.QtWidgets import QLabel, QSizePolicy
 
 from app.core.detector import Detection
@@ -16,9 +21,25 @@ DEFAULT_POSE_OVERLAY_ALPHA = 100  # 0~255, pose/CAD 오버레이 반투명도 �
 POSE_OVERLAY_RADIUS = 2.5  # px
 POSE_OVERLAY_LINE_WIDTH = 1.2  # px, 윤곽선 두께 (채워진 원이 아니라 속이 빈 원)
 POSE_OVERLAY_BASE_COLOR = (0, 220, 255)  # 하늘색 - 노란 볼트 실물과 안 겹치게
+ROI_COLOR = (255, 179, 0)  # 앰버 - 마스크(초록/주황 계열)와 안 겹치는 색
+
+MIN_ZOOM = 0.1   # 10%
+MAX_ZOOM = 8.0   # 800%
+ZOOM_STEP = 1.15  # 휠 한 칸당 배율
 
 
 class ImageViewer(QLabel):
+    #: ROI가 새로 지정되거나(값=(x1,y1,x2,y2), 원본 이미지 픽셀 좌표) 지워지면(값=None) emit.
+    roi_changed = pyqtSignal(object)
+    #: ROI 그리기 모드가 켜지거나(외부 토글 버튼) 드래그 완료로 자동으로 꺼질 때 emit -
+    #: 토글 버튼의 체크 상태를 실제 모드와 맞추기 위함.
+    roi_draw_mode_changed = pyqtSignal(bool)
+    #: 줌 배율이 바뀔 때마다(버튼/휠 어느 경로든) emit, 인자는 zoom_percent() 값.
+    #: eventFilter로 wheelEvent를 가로채 갱신하는 방식은 실패한다 - Qt는 이벤트
+    #: 필터를 위젯 자신의 이벤트 핸들러보다 먼저 호출하므로, 그 시점엔 아직
+    #: 줌 값이 갱신되기 전이다. 시그널을 실제 값이 바뀐 "이후"에 emit하는 게 맞다.
+    zoom_changed = pyqtSignal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -32,8 +53,23 @@ class ImageViewer(QLabel):
         self._mask_alpha = DEFAULT_MASK_ALPHA
         self._label_alpha = DEFAULT_LABEL_ALPHA
         self._pose_overlay_alpha = DEFAULT_POSE_OVERLAY_ALPHA
+
+        # 줌: fit_scale(뷰포트에 꽉 맞추는 배율) * zoom(사용자 배율 1.0=100% of fit).
+        # fit_scale은 뷰포트 크기가 바뀔 때마다(리사이즈, 처음 로드) 다시 계산한다.
+        self._zoom = 1.0
+        self._fit_scale = 1.0
+        self._render_scale = 1.0  # 마지막으로 실제 그릴 때 쓴 최종 배율(원본 픽셀 -> 화면 픽셀) - 마우스 좌표 역산용
+
+        # ROI: 원본 이미지 픽셀 좌표 (x1, y1, x2, y2), 없으면 None.
+        self._roi: tuple[int, int, int, int] | None = None
+        self._roi_draw_mode = False
+        self._roi_drag_start_img: tuple[float, float] | None = None
+        self._roi_drag_current_img: tuple[float, float] | None = None
+
+        self.setMouseTracking(True)
         self.setText("이미지를 불러오세요")
 
+    # ----------------------------------------------------------- 표시 옵션
     def set_axis_gizmo_visible(self, visible: bool) -> None:
         self._show_axis_gizmo = visible
         self._refresh()
@@ -53,10 +89,68 @@ class ImageViewer(QLabel):
         self._pose_overlay_alpha = alpha
         self._refresh()
 
+    # ----------------------------------------------------------------- 줌
+    def zoom_percent(self) -> int:
+        return round(self._zoom * 100)
+
+    def set_zoom(self, zoom: float, anchor_viewport_pos: QPoint | None = None) -> None:
+        """zoom=1.0이 '뷰포트에 꽉 맞춤'(기존 기본 동작)이다.
+
+        anchor_viewport_pos를 주면(보통 마우스 위치) 그 지점이 화면에서
+        가리키는 원본 이미지 지점이 줌 전후로 같은 화면 위치에 남도록
+        스크롤 위치를 맞춰준다(휠 줌의 표준 동작 - 커서 아래 지점을
+        기준으로 확대/축소).
+        """
+        new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
+        if new_zoom == self._zoom:
+            return
+
+        img_pt = None
+        if anchor_viewport_pos is not None:
+            img_pt = self._viewport_pos_to_image(anchor_viewport_pos)
+
+        self._zoom = new_zoom
+        self._refresh()
+        self.zoom_changed.emit(self.zoom_percent())
+
+        if img_pt is not None and anchor_viewport_pos is not None:
+            self._scroll_to_show(img_pt, anchor_viewport_pos)
+
+    def zoom_in(self) -> None:
+        self.set_zoom(self._zoom * ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        self.set_zoom(self._zoom / ZOOM_STEP)
+
+    def zoom_fit(self) -> None:
+        """줌을 100%(뷰포트에 꽉 맞춤)로 리셋."""
+        self.set_zoom(1.0)
+
+    # ----------------------------------------------------------------- ROI
+    def set_roi_draw_mode(self, enabled: bool) -> None:
+        """True면 다음 드래그로 ROI를 새로 그린다. 드래그 완료 시 자동으로 꺼진다."""
+        if enabled == self._roi_draw_mode:
+            return
+        self._roi_draw_mode = enabled
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor) if enabled else QCursor(Qt.CursorShape.ArrowCursor))
+        self.roi_draw_mode_changed.emit(enabled)
+
+    def get_roi(self) -> tuple[int, int, int, int] | None:
+        return self._roi
+
+    def set_roi(self, roi: tuple[int, int, int, int] | None) -> None:
+        self._roi = roi
+        self._refresh()
+        self.roi_changed.emit(roi)
+
+    def clear_roi(self) -> None:
+        self.set_roi(None)
+
     def load_image(self, path: str) -> None:
         self._base_pixmap = QPixmap(path)
         self._detections = []
         self._pose_overlays = {}
+        self._zoom = 1.0  # 새 프레임은 항상 '맞춤'으로 시작 (이전 줌/스크롤 위치가 새 이미지에서 엉뚱한 곳을 보여줄 수 있음)
         self._refresh()
 
     def set_detections(self, detections: list[Detection]) -> None:
@@ -93,6 +187,29 @@ class ImageViewer(QLabel):
         painter.setFont(font)
 
         colors = [QColor("#1D9E75"), QColor("#D85A30"), QColor("#378ADD"), QColor("#D4537E")]
+
+        # 0단계: ROI 바깥을 살짝 어둡게 덮어서 "이 안쪽만 검출 대상"임을 시각적으로 강조.
+        # 드래그로 그리는 중이면 확정된 self._roi 대신 지금 드래그 중인 사각형을 미리 보여준다.
+        roi_to_draw = self._roi
+        if self._roi_draw_mode and self._roi_drag_start_img is not None and self._roi_drag_current_img is not None:
+            roi_to_draw = self._normalized_roi(self._roi_drag_start_img, self._roi_drag_current_img)
+        if roi_to_draw is not None:
+            rx1, ry1, rx2, ry2 = roi_to_draw
+            img_w, img_h = canvas.width(), canvas.height()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 90))
+            for dim_rect in (
+                QRectF(0, 0, img_w, ry1),
+                QRectF(0, ry2, img_w, img_h - ry2),
+                QRectF(0, ry1, rx1, ry2 - ry1),
+                QRectF(rx2, ry1, img_w - rx2, ry2 - ry1),
+            ):
+                painter.drawRect(dim_rect)
+            roi_color = QColor(*ROI_COLOR)
+            pen = QPen(roi_color, 2.5, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(QRectF(rx1, ry1, rx2 - rx1, ry2 - ry1))
 
         # 1단계: 마스크 영역을 반투명 색으로 먼저 채운다 (bbox/라벨보다 아래에 깔림)
         for i, det in enumerate(self._detections):
@@ -136,11 +253,26 @@ class ImageViewer(QLabel):
 
         painter.end()
 
+        img_w, img_h = canvas.width(), canvas.height()
+        viewport = self._viewport_size()
+        if img_w > 0 and img_h > 0 and viewport.width() > 0 and viewport.height() > 0:
+            self._fit_scale = min(viewport.width() / img_w, viewport.height() / img_h)
+        else:
+            self._fit_scale = 1.0
+        self._render_scale = max(self._fit_scale * self._zoom, 0.01)
+
+        target_w = max(1, round(img_w * self._render_scale))
+        target_h = max(1, round(img_h * self._render_scale))
         scaled = canvas.scaled(
-            self.size(),
+            target_w, target_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        # 실제 렌더 배율을 스케일된 결과 기준으로 다시 맞춘다 - KeepAspectRatio가
+        # target_w/target_h를 정확히 못 맞추고 한쪽을 살짝 줄일 수 있어서(반올림
+        # 오차), 마우스 좌표 역산이 어긋나지 않도록 실측값으로 보정.
+        if scaled.width() > 0:
+            self._render_scale = scaled.width() / img_w
 
         if self._show_axis_gizmo:
             gizmo_painter = QPainter(scaled)
@@ -149,6 +281,7 @@ class ImageViewer(QLabel):
             gizmo_painter.end()
 
         self.setPixmap(scaled)
+        self.resize(scaled.size())
 
     def _draw_axis_gizmo(self, painter: QPainter, canvas_width: int, canvas_height: int) -> None:
         """카메라(씬) 좌표축과 roll/pitch/yaw 대응관계를 이미지 우측 상단에
@@ -276,3 +409,103 @@ class ImageViewer(QLabel):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._refresh()
+
+    # ------------------------------------------------------- 뷰포트/좌표 변환
+    def _viewport_size(self):
+        """줌 기준이 되는 '뷰포트' 크기. QScrollArea.setWidget(self)로 담겨있으면
+        parentWidget()이 바로 그 스크롤 영역의 뷰포트라 이 크기를 그대로 쓰면
+        되고, 스크롤 영역 없이 일반 레이아웃 안에 있으면 self.size()로 폴백한다."""
+        parent = self.parentWidget()
+        if parent is not None and parent.width() > 0 and parent.height() > 0:
+            return parent.size()
+        return self.size()
+
+    def _viewport_pos_to_image(self, viewport_pos: QPoint) -> tuple[float, float] | None:
+        """QScrollArea 뷰포트 기준 마우스 좌표 -> 원본 이미지 픽셀 좌표.
+        self는 QScrollArea 안에서 스크롤에 따라 이동하므로, mapFromParent로
+        먼저 self(=렌더된 픽스맵) 기준 좌표로 바꾼 뒤 렌더 배율로 나눈다."""
+        if self._base_pixmap is None or self._render_scale <= 0:
+            return None
+        local = self.mapFromParent(viewport_pos)
+        return (local.x() / self._render_scale, local.y() / self._render_scale)
+
+    def _widget_pos_to_image(self, widget_pos: QPoint) -> tuple[float, float] | None:
+        """self(=렌더된 픽스맵 QLabel) 기준 마우스 좌표 -> 원본 이미지 픽셀 좌표."""
+        if self._base_pixmap is None or self._render_scale <= 0:
+            return None
+        return (widget_pos.x() / self._render_scale, widget_pos.y() / self._render_scale)
+
+    def _scroll_to_show(self, img_pt: tuple[float, float], viewport_pos: QPoint) -> None:
+        """줌 이후 img_pt(원본 이미지 좌표)가 viewport_pos(뷰포트 기준 화면 좌표)에
+        그대로 보이도록 스크롤 위치를 맞춘다 - 마우스 아래 지점을 고정한 채 확대."""
+        from PyQt6.QtWidgets import QScrollArea
+        area = self.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        if area is None:
+            return
+        target_x = img_pt[0] * self._render_scale - viewport_pos.x()
+        target_y = img_pt[1] * self._render_scale - viewport_pos.y()
+        area.horizontalScrollBar().setValue(int(target_x))
+        area.verticalScrollBar().setValue(int(target_y))
+
+    @staticmethod
+    def _normalized_roi(p1: tuple[float, float], p2: tuple[float, float]) -> tuple[int, int, int, int]:
+        x1, y1 = p1
+        x2, y2 = p2
+        return (int(min(x1, x2)), int(min(y1, y2)), int(max(x1, x2)), int(max(y1, y2)))
+
+    # ----------------------------------------------------------- 휠 = 줌
+    def wheelEvent(self, event) -> None:
+        if self._base_pixmap is None:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = ZOOM_STEP if delta > 0 else (1.0 / ZOOM_STEP)
+        # event.position()은 self(QLabel) 기준 좌표 - set_zoom의 anchor는 부모(뷰포트)
+        # 기준을 기대하므로 mapToParent로 변환.
+        anchor = self.mapToParent(event.position().toPoint())
+        self.set_zoom(self._zoom * factor, anchor_viewport_pos=anchor)
+        event.accept()
+
+    # ----------------------------------------------------------- ROI 드래그
+    def mousePressEvent(self, event) -> None:
+        if self._roi_draw_mode and event.button() == Qt.MouseButton.LeftButton:
+            img_pt = self._widget_pos_to_image(event.pos())
+            if img_pt is not None:
+                self._roi_drag_start_img = img_pt
+                self._roi_drag_current_img = img_pt
+                self._refresh()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._roi_draw_mode and self._roi_drag_start_img is not None:
+            img_pt = self._widget_pos_to_image(event.pos())
+            if img_pt is not None:
+                self._roi_drag_current_img = img_pt
+                self._refresh()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._roi_draw_mode and event.button() == Qt.MouseButton.LeftButton and self._roi_drag_start_img is not None:
+            img_pt = self._widget_pos_to_image(event.pos())
+            if img_pt is not None and self._base_pixmap is not None:
+                img_w, img_h = self._base_pixmap.width(), self._base_pixmap.height()
+                x1, y1, x2, y2 = self._normalized_roi(self._roi_drag_start_img, img_pt)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(img_w, x2), min(img_h, y2)
+                # 너무 작게(거의 클릭만) 그리면 실수로 그린 것으로 보고 무시.
+                if x2 - x1 >= 10 and y2 - y1 >= 10:
+                    self.set_roi((x1, y1, x2, y2))
+            self._roi_drag_start_img = None
+            self._roi_drag_current_img = None
+            self.set_roi_draw_mode(False)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

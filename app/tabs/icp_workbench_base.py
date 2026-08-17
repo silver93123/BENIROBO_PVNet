@@ -30,7 +30,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal, Qt, QProcess
+from PyQt6.QtCore import pyqtSignal, Qt, QProcess, QEvent
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QMessageBox, QLineEdit, QScrollArea, QFrame,
@@ -258,7 +258,59 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         opacity_row.addStretch(1)
         center.addLayout(opacity_row)
 
-        center.addWidget(self.image_viewer, stretch=1)
+        roi_zoom_row = QHBoxLayout()
+        self.btn_roi_draw = QPushButton("ROI 지정")
+        self.btn_roi_draw.setCheckable(True)
+        self.btn_roi_draw.setToolTip("누른 뒤 이미지 위를 드래그해서 검출 대상 영역을 지정합니다.")
+        self.btn_roi_draw.toggled.connect(self.image_viewer.set_roi_draw_mode)
+        self.image_viewer.roi_draw_mode_changed.connect(self.btn_roi_draw.setChecked)
+        roi_zoom_row.addWidget(self.btn_roi_draw)
+
+        btn_roi_clear = QPushButton("ROI 해제")
+        btn_roi_clear.clicked.connect(self.image_viewer.clear_roi)
+        roi_zoom_row.addWidget(btn_roi_clear)
+
+        self.roi_status_label = QLabel("ROI: 지정 안 됨 (전체 영역)")
+        self.roi_status_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.image_viewer.roi_changed.connect(self._on_roi_changed)
+        roi_zoom_row.addWidget(self.roi_status_label)
+
+        roi_zoom_row.addStretch(1)
+
+        btn_zoom_out = QPushButton("−")
+        btn_zoom_out.setFixedWidth(28)
+        btn_zoom_out.clicked.connect(self.image_viewer.zoom_out)
+        roi_zoom_row.addWidget(btn_zoom_out)
+
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setFixedWidth(44)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        roi_zoom_row.addWidget(self.zoom_label)
+
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_in.setFixedWidth(28)
+        btn_zoom_in.clicked.connect(self.image_viewer.zoom_in)
+        roi_zoom_row.addWidget(btn_zoom_in)
+
+        btn_zoom_fit = QPushButton("맞춤")
+        btn_zoom_fit.setToolTip("확대/축소를 화면에 꽉 맞춤(100%)으로 리셋합니다. 마우스 휠로도 확대/축소할 수 있습니다.")
+        btn_zoom_fit.clicked.connect(self.image_viewer.zoom_fit)
+        roi_zoom_row.addWidget(btn_zoom_fit)
+
+        center.addLayout(roi_zoom_row)
+
+        # ImageViewer를 QScrollArea에 담아서 확대했을 때 스크롤로 볼 수 있게 한다.
+        # zoom=1.0(기본)일 때는 뷰포트에 꽉 맞춰 그려지므로 기존과 동일하게 보인다.
+        image_scroll = QScrollArea()
+        image_scroll.setWidgetResizable(False)
+        image_scroll.setWidget(self.image_viewer)
+        image_scroll.setStyleSheet("QScrollArea { border: none; }")
+        center.addWidget(image_scroll, stretch=1)
+
+        # 줌 배율 라벨은 버튼 클릭이든 마우스 휠이든 어느 경로로 바뀌든
+        # image_viewer.zoom_changed 시그널 하나로 갱신한다 (실제 값이 바뀐
+        # "이후"에 emit되므로 항상 최신값을 보여준다).
+        self.image_viewer.zoom_changed.connect(lambda pct: self.zoom_label.setText(f"{pct}%"))
 
         center_widget = QWidget()
         center_widget.setLayout(center)
@@ -324,6 +376,24 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         slider.valueChanged.connect(setter)
         layout.addWidget(slider)
         return slider
+
+    @staticmethod
+    def _bbox_center_in_roi(bbox, roi: tuple[int, int, int, int]) -> bool:
+        """검출 bbox의 중심점이 ROI 사각형 안에 있는지. 중심점 기준으로 판정하는
+        이유: bbox 전체 포함/겹침 기준이면 ROI 경계에 걸친 물체가 애매하게
+        판정되는데(반쯤 걸친 물체를 포함시킬지 뺄지), 중심점 기준이 "이 물체가
+        ROI 안에 있다"는 직관과 가장 가깝다."""
+        x1, y1, x2, y2 = bbox
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        rx1, ry1, rx2, ry2 = roi
+        return rx1 <= cx <= rx2 and ry1 <= cy <= ry2
+
+    def _on_roi_changed(self, roi) -> None:
+        if roi is None:
+            self.roi_status_label.setText("ROI: 지정 안 됨 (전체 영역)")
+        else:
+            x1, y1, x2, y2 = roi
+            self.roi_status_label.setText(f"ROI: ({x1},{y1})–({x2},{y2})")
 
     def _refresh_checkpoint_display(self) -> None:
         """'설정' 탭에 저장된 체크포인트/config 경로를 읽어 읽기전용 필드에 반영."""
@@ -414,6 +484,15 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
             self.log_message.emit(
                 f"[{self.LOG_PREFIX}] {active_tab.pipeline_name}: initial_pose 제공 "
                 f"{n_with_pose}/{len(detections)}건 (나머지는 fallback 정합 알고리즘 사용)"
+            )
+
+        roi = self.image_viewer.get_roi()
+        if roi is not None:
+            n_before = len(detections)
+            detections = [d for d in detections if self._bbox_center_in_roi(d.bbox, roi)]
+            self.log_message.emit(
+                f"[{self.LOG_PREFIX}] ROI 필터: {n_before}건 중 {len(detections)}건이 ROI 안쪽 "
+                f"(bbox 중심 기준, ROI={roi})"
             )
 
         self._last_detections = detections
