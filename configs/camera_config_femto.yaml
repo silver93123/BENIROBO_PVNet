@@ -18,7 +18,7 @@ camera:
   #   512x512 (WFOV Binned   — 약 0.25~2.5 m, 근거리 유리)
   depth_width: 640
   depth_height: 576
-  fps: 15
+  fps: '15'
 
   # 카메라 캡처 타임아웃 (ms), 워밍업 프레임 수 (초기 프레임 불안정 대비)
   capture_timeout_ms: 2000
@@ -50,7 +50,7 @@ camera:
     color:
       OB_PROP_COLOR_AUTO_EXPOSURE_BOOL: true
       # 수동 노출을 쓰려면 위를 false로 바꾸고 아래 EXPOSURE/GAIN을 원하는 값으로.
-      OB_PROP_COLOR_EXPOSURE_INT: 200
+      OB_PROP_COLOR_EXPOSURE_INT: 500
       OB_PROP_COLOR_GAIN_INT: 0
       OB_PROP_COLOR_AUTO_WHITE_BALANCE_BOOL: true
       OB_PROP_COLOR_WHITE_BALANCE_INT: 6500

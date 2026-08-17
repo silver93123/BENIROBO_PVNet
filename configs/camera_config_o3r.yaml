@@ -30,7 +30,7 @@ camera:
   # 2D-3D registration(o3r-algo-utilities 패키지 필요)을 사용하며,
   # 실패해도(패키지 미설치, 다른 헤드의 포트 등) intensity/depth 기반
   # 기본 파이프라인은 영향받지 않는다.
-  capture_rgb: false
+  capture_rgb: true
 
   valid_z_range_mm: [100.0, 1500.0]
 
