@@ -1,0 +1,12 @@
+.vscode/
+models/
+data/
+work_dirs/
+checkpoints/
+
+__pycache__/
+*.pyc
+*.pyo
+
+Log/
+persist.json
