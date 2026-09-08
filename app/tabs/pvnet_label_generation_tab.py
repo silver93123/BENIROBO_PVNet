@@ -64,16 +64,37 @@ from PyQt6.QtWidgets import (
 
 from app.core import settings_manager
 from app.core.camera_intrinsics import estimate_intrinsics_from_organized_pcd, project_points
-from app.core.paths import PROJECT_ROOT
 from app.tabs.live_capture_icp_tab import LiveCaptureICPTab
 from src.detection.pvnet import farthest_point_sampling
 
-DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "pvnet_data"
-DEFAULT_MASK_OUT_DIR = DEFAULT_DATA_ROOT / "labels_masks"
-DEFAULT_IMAGE_OUT_DIR = DEFAULT_DATA_ROOT / "labels_images"
-DEFAULT_LABELS_OUT = DEFAULT_DATA_ROOT / "labels.json"
-DEFAULT_PREVIEW_DIR = DEFAULT_DATA_ROOT / "labels_preview"
-DEFAULT_KEYPOINTS_OUT_TEMPLATE = str(DEFAULT_DATA_ROOT / "keypoints_{cad_stem}.npy")
+def data_root() -> Path:
+    """PVNet 라벨 데이터 루트. '설정' 탭에서 바꾼 값을 매번 다시 읽으므로
+    (settings_manager.pvnet_data_root() 참고), 이 탭을 계속 켜둔 채로 설정을
+    바꿔도 다음 저장/로드 시점부터 바로 반영된다 - 예전처럼 import 시점에
+    한 번 고정되는 상수가 아니다."""
+    return settings_manager.pvnet_data_root()
+
+
+def mask_out_dir() -> Path:
+    return data_root() / "labels_masks"
+
+
+def image_out_dir() -> Path:
+    return data_root() / "labels_images"
+
+
+def labels_out_path() -> Path:
+    return data_root() / "labels.json"
+
+
+def preview_dir() -> Path:
+    return data_root() / "labels_preview"
+
+
+def keypoints_out_path_for(cad_stem: str) -> Path:
+    return data_root() / f"keypoints_{cad_stem}.npy"
+
+
 DEFAULT_LABEL_FITNESS_MIN = 0.85  # ICP 파라미터 박스의 fitness threshold(보통 0.6~0.7)보다
                                    # 엄격하게 - "정합 성공"과 "학습 라벨로 쓸 만큼 확실함"은 다른 기준.
 DEFAULT_NUM_KEYPOINTS = 8
@@ -232,13 +253,20 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
         self.generate_status_label.setText("아직 생성 안 됨")
         self.image_viewer.clear_label_preview_overlays()
 
+    def _on_exclusion_changed(self) -> None:
+        """결과 카드의 '제외' 체크박스를 토글하면(icp_workbench_base.py 훅),
+        이미 계산해둔 '라벨 생성' 결과는 그 인스턴스를 포함/제외하기 전
+        상태라 더 이상 유효하지 않다 - 새 프레임/ICP 재실행과 동일하게
+        무효화해서 재생성을 강제한다."""
+        self._invalidate_pending_labels()
+
     # ----------------------------------------------------- 키포인트 3D (CAD 1회 계산)
     def _keypoints_out_path(self, cad_path: str) -> Path:
         custom = self.keypoints_out_edit.text().strip()
         if custom:
             return Path(custom)
         cad_stem = Path(cad_path).stem
-        return Path(DEFAULT_KEYPOINTS_OUT_TEMPLATE.format(cad_stem=cad_stem))
+        return keypoints_out_path_for(cad_stem)
 
     def _ensure_keypoints_3d(self, cad_path: str) -> bool:
         """self._cad_pcd(ICPWorkbenchTab이 이미 로드해둔 것)에서 FPS로
@@ -334,6 +362,9 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
             if not result.ok or result.fitness is None:
                 detail_lines.append(f"  obj{i}: ICP 실패 - 제외")
                 continue
+            if result.instance_id in self._excluded_instance_ids:
+                detail_lines.append(f"  obj{i}: 수동 제외됨 (카드 체크박스)")
+                continue
 
             # ICP가 낸 전체 pose(R,t)는 이미 CAD 로컬 좌표계 -> 씬(카메라) 좌표계로
             # 정합된 값이므로, 키포인트(같은 CAD 로컬 좌표계에서 뽑음)에 그대로
@@ -406,9 +437,10 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
         cad_path = self._pending_label_data["cad_path"]
         fx, fy, cx, cy = self._pending_label_data["intrinsics"]
 
-        DEFAULT_MASK_OUT_DIR.mkdir(parents=True, exist_ok=True)
-        DEFAULT_IMAGE_OUT_DIR.mkdir(parents=True, exist_ok=True)
-        DEFAULT_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+        mask_dir, image_dir, prev_dir = mask_out_dir(), image_out_dir(), preview_dir()
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        image_dir.mkdir(parents=True, exist_ok=True)
+        prev_dir.mkdir(parents=True, exist_ok=True)
 
         # LiveCaptureICPTab의 촬영본(self._current_image_path)은 임시 경로라
         # data/ 아래 영구 위치로 복사해둔다 (live_label_generation_tab.py와
@@ -426,7 +458,7 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
         frame_tag = self._current_frame or "frame"
 
         image_ext = os.path.splitext(self._current_image_path)[1] or ".png"
-        permanent_image_path = DEFAULT_IMAGE_OUT_DIR / f"{stamp}_{frame_tag}{image_ext}"
+        permanent_image_path = image_dir / f"{stamp}_{frame_tag}{image_ext}"
         shutil.copy2(self._current_image_path, permanent_image_path)
 
         gray = cv2.imread(str(permanent_image_path), cv2.IMREAD_GRAYSCALE)
@@ -447,7 +479,7 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
             result = self._last_icp_results[i]
 
             mask_filename = f"{stamp}_{frame_tag}_obj{i}.npy"
-            mask_path = DEFAULT_MASK_OUT_DIR / mask_filename
+            mask_path = mask_dir / mask_filename
             np.save(mask_path, det.mask.astype(bool))
 
             self._saved_labels.append({
@@ -463,7 +495,7 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
             self._n_saved_session += 1
 
             if frame_bgr is not None:
-                preview_path = DEFAULT_PREVIEW_DIR / mask_filename.replace(".npy", ".jpg")
+                preview_path = prev_dir / mask_filename.replace(".npy", ".jpg")
                 self._save_preview_image(
                     frame_bgr, det.mask, det.bbox, fitness, keypoints_2d, preview_path
                 )
@@ -476,12 +508,13 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
             )
             return
 
-        atomic_write_json(DEFAULT_LABELS_OUT, self._saved_labels)
+        labels_path = labels_out_path()
+        atomic_write_json(labels_path, self._saved_labels)
 
         self.label_count_label.setText(f"누적 저장: {self._n_saved_session}건")
         self.log_message.emit(
             f"[{self.LOG_PREFIX}] 라벨 {n_saved_this_frame}건 저장 "
-            f"(건너뜀 {n_skipped}건, 누적 {self._n_saved_session}건) -> {DEFAULT_LABELS_OUT}"
+            f"(건너뜀 {n_skipped}건, 누적 {self._n_saved_session}건) -> {labels_path}"
         )
 
         # 저장 완료 - 이 프레임을 또 저장하려면 "생성"부터 다시 눌러야 한다
@@ -494,10 +527,11 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
 
     def _load_existing_labels(self) -> None:
         """탭을 다시 켰을 때 기존에 저장해둔 라벨 파일이 있으면 이어서 누적한다."""
-        if not DEFAULT_LABELS_OUT.is_file():
+        labels_path = labels_out_path()
+        if not labels_path.is_file():
             return
         try:
-            with open(DEFAULT_LABELS_OUT, "r", encoding="utf-8") as f:
+            with open(labels_path, "r", encoding="utf-8") as f:
                 self._saved_labels = json.load(f)
             self._n_saved_session = len(self._saved_labels)
             self.label_count_label.setText(f"누적 저장: {self._n_saved_session}건 (기존 파일에 이어서 씀)")

@@ -52,6 +52,7 @@ class SettingsTab(QWidget):
 
         layout.addWidget(self._build_detection_group())
         layout.addWidget(self._build_camera_group())
+        layout.addWidget(self._build_pvnet_data_group())
         layout.addWidget(self._build_icp_params_box())
         self.fgr_box = self._build_fgr_params_box()
         layout.addWidget(self.fgr_box)
@@ -138,6 +139,55 @@ class SettingsTab(QWidget):
             self.status_label.setText(f"자동 감지됨: {best}")
         else:
             QMessageBox.information(self, "알림", f"config 기준으로 체크포인트를 찾지 못했습니다: {cfg_path}")
+
+    # ----------------------------------------------------- PVNet 라벨 데이터 경로
+    def _build_pvnet_data_group(self) -> QGroupBox:
+        """PVNet 라벨 생성/관리/학습 탭이 공통으로 쓰는 데이터 루트
+        (labels.json, labels_masks/, labels_images/, labels_preview/,
+        keypoints_*.npy)를 여기서만 지정한다 - settings_manager.pvnet_data_root()
+        가 이 값을 매번 다시 읽으므로, 여기서 저장하면 다른 탭을 미리 열어두지
+        않았어도 다음 저장/로드 시점부터 바로 반영된다."""
+        group = QGroupBox("PVNet 라벨 데이터 저장 경로")
+        layout = QVBoxLayout(group)
+
+        hint = QLabel(
+            "PVNet 라벨 생성/관리/학습 탭이 공통으로 쓰는 데이터 폴더입니다.\n"
+            "비워두면 기본값(data/pvnet_data)을 씁니다."
+        )
+        hint.setStyleSheet("color: #888; font-size: 10px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        row = QHBoxLayout()
+        self.pvnet_data_root_edit = QLineEdit()
+        self.pvnet_data_root_edit.setPlaceholderText(str(settings_manager.pvnet_data_root()))
+        row.addWidget(self.pvnet_data_root_edit, stretch=1)
+        btn_browse = QPushButton("선택")
+        btn_browse.clicked.connect(self._on_browse_pvnet_data_root)
+        row.addWidget(btn_browse)
+        btn_default = QPushButton("기본값으로")
+        btn_default.setToolTip("비워서 기본 경로(data/pvnet_data)를 다시 쓰게 합니다.")
+        btn_default.clicked.connect(lambda: self.pvnet_data_root_edit.setText(""))
+        row.addWidget(btn_default)
+        layout.addLayout(row)
+
+        note = QLabel(
+            "⚠ 경로를 바꿔도 기존 데이터가 자동으로 옮겨지지 않습니다. 이미 라벨을\n"
+            "모아뒀다면 저장 전에 직접 새 경로로 옮기거나, 옛 데이터가 있는 경로를\n"
+            "그대로 지정하세요."
+        )
+        note.setStyleSheet("color: #b8860b; font-size: 10px;")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        return group
+
+    def _on_browse_pvnet_data_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "PVNet 데이터 폴더 선택", self.pvnet_data_root_edit.text() or str(settings_manager.pvnet_data_root())
+        )
+        if path:
+            self.pvnet_data_root_edit.setText(path)
 
     # ----------------------------------------------------------------- 카메라
     def _build_camera_group(self) -> QGroupBox:
@@ -511,6 +561,7 @@ class SettingsTab(QWidget):
             "checkpoint_path": self.checkpoint_edit.text().strip(),
             "config_path": self.config_edit.text().strip(),
             "score_threshold": self.spin_score_threshold.value(),
+            "pvnet_data_root": self.pvnet_data_root_edit.text().strip(),
             "camera_type": self.camera_type_combo.currentText(),
             "averaging_num_frames": self.spin_avg_frames.value(),
             "averaging_min_valid_ratio": self.spin_min_valid_ratio.value(),
@@ -542,6 +593,7 @@ class SettingsTab(QWidget):
         self.checkpoint_edit.setText(settings["checkpoint_path"])
         self.config_edit.setText(settings["config_path"])
         self.spin_score_threshold.setValue(settings["score_threshold"])
+        self.pvnet_data_root_edit.setText(settings.get("pvnet_data_root", ""))
         idx = self.camera_type_combo.findText(settings["camera_type"])
         self.camera_type_combo.setCurrentIndex(max(0, idx))
         self.spin_avg_frames.setValue(settings["averaging_num_frames"])

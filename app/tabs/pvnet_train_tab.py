@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core.paths import PROJECT_ROOT
-from app.tabs.pvnet_label_generation_tab import DEFAULT_LABELS_OUT as DEFAULT_LABELS_PATH
+from app.tabs.pvnet_label_generation_tab import labels_out_path
 
 DEFAULT_OUT_DIR = PROJECT_ROOT / "checkpoints" / "pvnet_run"
 TRAIN_SCRIPT = PROJECT_ROOT / "scripts" / "train_pvnet.py"
@@ -120,7 +120,7 @@ class PVNetTrainTab(QWidget):
         group = QGroupBox("경로")
         form = QFormLayout(group)
 
-        self.labels_edit = QLineEdit(str(DEFAULT_LABELS_PATH))
+        self.labels_edit = QLineEdit(str(labels_out_path()))
         form.addRow("라벨 JSON", self._with_browse_button(self.labels_edit, self._on_browse_labels))
 
         self.keypoints3d_edit = QLineEdit()

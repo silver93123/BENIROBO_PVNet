@@ -46,6 +46,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- CAD 모델 ('CAD 모델 설정' 탭에서 관리) ---
     "cad_path": "",
 
+    # --- PVNet 라벨 데이터 저장 경로 ('설정' 탭에서 관리) ---
+    # 비워두면 기본값(PROJECT_ROOT/data/pvnet_data)을 쓴다 - 아래
+    # pvnet_data_root() 헬퍼가 이 규칙을 그대로 구현한다.
+    "pvnet_data_root": "",
+
     # --- ICP 공통 (등록 알고리즘 무관) ---
     "use_visible_face_filtering": True,
     "mask_erode_px": 1,
@@ -139,3 +144,17 @@ def save_settings(settings: dict[str, Any]) -> None:
 def icp_params_kwargs(settings: dict[str, Any]) -> dict[str, Any]:
     """settings dict -> ICPParams(**kwargs)에 바로 넣을 수 있는 부분집합."""
     return {key: settings[key] for key in _ICP_PARAM_KEYS if key in settings}
+
+
+def pvnet_data_root() -> Path:
+    """PVNet 라벨 데이터(labels.json/labels_masks/labels_images/labels_preview/
+    keypoints_*.npy)를 저장할 루트 디렉터리.
+
+    '설정' 탭에서 지정한 값이 있으면 그걸 쓰고, 비어있으면(기본값)
+    PROJECT_ROOT/data/pvnet_data를 쓴다. 이 함수를 호출할 때마다
+    load_settings()로 다시 읽으므로(캐시 없음), '설정' 탭에서 방금 바꾼 값이
+    다른 탭을 미리 열어두지 않았어도 즉시 반영된다 - CAD 경로/체크포인트
+    경로가 이미 쓰는 것과 동일한 원칙.
+    """
+    custom = load_settings().get("pvnet_data_root", "").strip()
+    return Path(custom) if custom else PROJECT_ROOT / "data" / "pvnet_data"

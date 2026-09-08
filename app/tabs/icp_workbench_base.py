@@ -81,6 +81,15 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         self._last_icp_results: list[ICPResult] = []
         self._icp_original_T: dict[int, np.ndarray] = {}
         self._result_card_widgets: dict[int, dict] = {}
+        # 라벨링하기 애매한 인스턴스(겹침/오검출 등)를 카드의 체크박스로 수동
+        # 제외할 수 있게 하는 집합 - 새 ICP 결과가 들어오면(_clear_result_panel)
+        # 항상 초기화된다(그 프레임에서 다시 판단해야 하므로 이전 프레임의
+        # 제외 상태를 들고 오지 않음). 이 base 클래스는 카드에 체크박스를
+        # 그리고 상태만 들고 있을 뿐, "제외된 걸 실제로 어떻게 쓸지"는 서브
+        # 클래스(pvnet_label_generation_tab.py)가 판단한다 - 예를 들어
+        # ManualLabelingTab처럼 결과 카드 자체를 안 쓰는 탭은 이 값을 아예
+        # 참조하지 않으므로 영향이 없다.
+        self._excluded_instance_ids: set[int] = set()
         self._cad_pcd = None
         self._cad_visible_normal = None
         self._cad_visible_flipped = None
@@ -727,6 +736,7 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
                 widget.deleteLater()
         self._icp_original_T = {}
         self._result_card_widgets = {}
+        self._excluded_instance_ids = set()
 
     def _render_result_panel(self, results: list[ICPResult]) -> None:
         self._clear_result_panel()
@@ -756,6 +766,19 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
                 status.setStyleSheet("color: #2a8a2a;")
                 header_row.addWidget(status)
                 header_row.addStretch(1)
+
+                exclude_check = QCheckBox("제외")
+                exclude_check.setToolTip(
+                    "체크하면 이 인스턴스를 라벨 생성/저장 대상에서 뺍니다\n"
+                    "(겹침·오검출 등 라벨링하기 애매한 경우). ICP를 다시 돌리거나\n"
+                    "새 프레임을 찍으면 초기화됩니다."
+                )
+                exclude_check.setChecked(r.instance_id in self._excluded_instance_ids)
+                exclude_check.toggled.connect(
+                    lambda checked, iid=r.instance_id: self._on_exclude_toggled(iid, checked)
+                )
+                header_row.addWidget(exclude_check)
+
                 layout.addLayout(header_row)
                 if r.was_flipped:
                     flip_label = QLabel("뒤집힘 보정됨")
@@ -774,6 +797,20 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
                     layout.addWidget(QLabel(f"fitness {r.fitness:.3f}"))
 
             self.result_layout.insertWidget(self.result_layout.count() - 1, card)
+
+    def _on_exclude_toggled(self, instance_id: int, checked: bool) -> None:
+        if checked:
+            self._excluded_instance_ids.add(instance_id)
+        else:
+            self._excluded_instance_ids.discard(instance_id)
+        self._on_exclusion_changed()
+
+    def _on_exclusion_changed(self) -> None:
+        """제외 체크박스 상태가 바뀔 때마다 호출되는 훅. 기본 구현은 아무것도
+        안 한다 - "제외"가 실제로 무언가에 영향을 주는 탭(예:
+        pvnet_label_generation_tab.py)만 오버라이드해서, 이미 계산해둔
+        캐시(예: '라벨 생성' 미리보기 결과)를 무효화하면 된다."""
+        pass
 
     def _build_pose_edit_row(self, instance_id: int) -> QWidget:
         """ICP 결과의 위치(mm)/회전(deg)을 "델타 보정량"이 아니라 현재 값을

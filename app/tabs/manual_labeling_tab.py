@@ -34,6 +34,7 @@ import json
 import os
 import shutil
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from PyQt6.QtWidgets import (
@@ -54,11 +55,15 @@ ROTMDET_TAB_NAME = "RTMDet"
 DEFAULT_MASK_OUT_DIR = PROJECT_ROOT / "data" / "rotation_labels_masks"       # RotHead와 동일 폴더 공유
 DEFAULT_IMAGE_OUT_DIR = PROJECT_ROOT / "data" / "rotation_labels_images"     # RotHead와 동일 폴더 공유
 DEFAULT_ROTATION_LABELS_OUT = PROJECT_ROOT / "data" / "rotation_labels.json"  # RotHead와 완전히 같은 파일
-# PVNet 라벨/키포인트 출력 경로는 pvnet_label_generation_tab.py의 상수를 그대로
-# 가져다 쓴다(단일 출처 유지 - 이 탭과 탭2가 서로 다른 경로를 보게 되는 사고
-# 방지. pvnet_label_manager_tab.py도 같은 원칙을 쓴다).
-DEFAULT_PVNET_LABELS_OUT = _pvnet_gen_tab.DEFAULT_LABELS_OUT
-DEFAULT_KEYPOINTS_3D_OUT = _pvnet_gen_tab.DEFAULT_DATA_ROOT / "keypoints_3d.npy"
+# PVNet 라벨/키포인트 출력 경로는 pvnet_label_generation_tab.py의 함수를
+# 그대로 호출한다(단일 출처 유지). '설정' 탭 값이 바뀌어도 매번 새로
+# 읽히도록 상수가 아니라 함수로 둔다.
+def _pvnet_labels_out() -> Path:
+    return _pvnet_gen_tab.labels_out_path()
+
+
+def _pvnet_keypoints_3d_out() -> Path:
+    return _pvnet_gen_tab.data_root() / "keypoints_3d.npy"
 
 PVNET_NUM_KEYPOINTS = 8
 SYMMETRY_AXIS_CHOICES = ["none", "x", "y", "z"]
@@ -254,7 +259,9 @@ class ManualLabelingTab(LiveCaptureICPTab):
                 cad_points, num_keypoints=PVNET_NUM_KEYPOINTS, include_centroid=True
             )
             self._keypoints_3d_cad_path = cad_path
-            np.save(DEFAULT_KEYPOINTS_3D_OUT, self._keypoints_3d)
+            kpts_out = _pvnet_keypoints_3d_out()
+            kpts_out.parent.mkdir(parents=True, exist_ok=True)
+            np.save(kpts_out, self._keypoints_3d)
 
             if len(cad_points) > OVERLAY_MAX_POINTS:
                 idx = np.random.default_rng(0).choice(len(cad_points), OVERLAY_MAX_POINTS, replace=False)
@@ -482,12 +489,13 @@ class ManualLabelingTab(LiveCaptureICPTab):
         DEFAULT_ROTATION_LABELS_OUT.parent.mkdir(parents=True, exist_ok=True)
         with open(DEFAULT_ROTATION_LABELS_OUT, "w", encoding="utf-8") as f:
             json.dump(self._rotation_labels, f, ensure_ascii=False, indent=2)
-        _pvnet_gen_tab.atomic_write_json(DEFAULT_PVNET_LABELS_OUT, self._pvnet_labels)
+        pvnet_labels_path = _pvnet_labels_out()
+        _pvnet_gen_tab.atomic_write_json(pvnet_labels_path, self._pvnet_labels)
 
         self.manual_count_label.setText(f"누적 저장: {self._n_saved_session}건")
         self.log_message.emit(
             f"[{self.LOG_PREFIX}] {n_saved}건 저장 (누적 {self._n_saved_session}건) -> "
-            f"{DEFAULT_ROTATION_LABELS_OUT.name} + {DEFAULT_PVNET_LABELS_OUT.name}"
+            f"{DEFAULT_ROTATION_LABELS_OUT.name} + {pvnet_labels_path.name}"
         )
 
     def _load_existing_labels(self) -> None:
@@ -499,9 +507,10 @@ class ManualLabelingTab(LiveCaptureICPTab):
             except (json.JSONDecodeError, OSError) as exc:
                 self.log_message.emit(f"[{self.LOG_PREFIX}] rotation_labels.json 로드 실패 (무시): {exc}")
 
-        if DEFAULT_PVNET_LABELS_OUT.is_file():
+        pvnet_labels_path = _pvnet_labels_out()
+        if pvnet_labels_path.is_file():
             try:
-                with open(DEFAULT_PVNET_LABELS_OUT, "r", encoding="utf-8") as f:
+                with open(pvnet_labels_path, "r", encoding="utf-8") as f:
                     self._pvnet_labels = json.load(f)
             except (json.JSONDecodeError, OSError) as exc:
                 self.log_message.emit(f"[{self.LOG_PREFIX}] labels.json 로드 실패 (무시): {exc}")

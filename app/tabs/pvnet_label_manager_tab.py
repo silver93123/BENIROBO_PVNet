@@ -46,8 +46,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.tabs.pvnet_label_generation_tab import (
-    DEFAULT_DATA_ROOT, DEFAULT_IMAGE_OUT_DIR, DEFAULT_LABELS_OUT, DEFAULT_MASK_OUT_DIR,
-    DEFAULT_PREVIEW_DIR, atomic_write_json,
+    atomic_write_json, data_root, image_out_dir, labels_out_path, mask_out_dir, preview_dir,
 )
 
 LABEL_LIST_WIDTH = 160
@@ -216,13 +215,14 @@ class PVNetLabelManagerTab(QWidget):
         if not mask_path:
             return None
         name = Path(mask_path).name.replace(".npy", ".jpg")
-        return DEFAULT_PREVIEW_DIR / name
+        return preview_dir() / name
 
     # ----------------------------------------------------------- 로드/표시
     def _reload(self) -> None:
-        if DEFAULT_LABELS_OUT.is_file():
+        labels_path = labels_out_path()
+        if labels_path.is_file():
             try:
-                with open(DEFAULT_LABELS_OUT, "r", encoding="utf-8") as f:
+                with open(labels_path, "r", encoding="utf-8") as f:
                     self._labels = json.load(f)
             except (json.JSONDecodeError, OSError) as exc:
                 QMessageBox.critical(self, "로드 실패", f"labels.json을 읽지 못했습니다:\n{exc}")
@@ -238,13 +238,18 @@ class PVNetLabelManagerTab(QWidget):
         warn = ""
         if len(hist) > 1:
             warn = "  ⚠ 키포인트 개수가 서로 다른 라벨이 섞여 있습니다 - 이대로 학습하면 문제가 될 수 있습니다."
-        self.summary_label.setText(f"총 {len(self._labels)}건  |  키포인트 개수별: {hist_text}{warn}")
+        not_found_note = "" if labels_path.is_file() else f"  (파일 없음: {labels_path})"
+        self.summary_label.setText(
+            f"데이터 경로: {data_root()}\n"
+            f"총 {len(self._labels)}건  |  키포인트 개수별: {hist_text}{warn}{not_found_note}"
+        )
 
         self._refresh_keypoints_files_info()
         self._rebuild_list()
 
     def _refresh_keypoints_files_info(self) -> None:
-        files = sorted(DEFAULT_DATA_ROOT.glob("keypoints_*.npy")) if DEFAULT_DATA_ROOT.is_dir() else []
+        root = data_root()
+        files = sorted(root.glob("keypoints_*.npy")) if root.is_dir() else []
         if not files:
             self.keypoints_files_label.setText("(없음)")
             return
@@ -353,7 +358,7 @@ class PVNetLabelManagerTab(QWidget):
                 n_files_deleted += 1
 
         self._labels = remaining
-        atomic_write_json(DEFAULT_LABELS_OUT, self._labels)
+        atomic_write_json(labels_out_path(), self._labels)
 
         self.log_message.emit(
             f"[{self.LOG_PREFIX}] {len(selected_idx)}건 삭제 (연관 파일 {n_files_deleted}개 포함), "
@@ -385,16 +390,17 @@ class PVNetLabelManagerTab(QWidget):
             if p is not None:
                 referenced_previews.add(os.path.abspath(str(p)))
 
+        mask_dir, prev_dir, img_dir = mask_out_dir(), preview_dir(), image_out_dir()
         orphan_masks = [
-            p for p in DEFAULT_MASK_OUT_DIR.glob("*.npy") if os.path.abspath(str(p)) not in referenced_masks
-        ] if DEFAULT_MASK_OUT_DIR.is_dir() else []
+            p for p in mask_dir.glob("*.npy") if os.path.abspath(str(p)) not in referenced_masks
+        ] if mask_dir.is_dir() else []
         orphan_previews = [
-            p for p in DEFAULT_PREVIEW_DIR.glob("*.jpg") if os.path.abspath(str(p)) not in referenced_previews
-        ] if DEFAULT_PREVIEW_DIR.is_dir() else []
+            p for p in prev_dir.glob("*.jpg") if os.path.abspath(str(p)) not in referenced_previews
+        ] if prev_dir.is_dir() else []
         orphan_images = [
-            p for p in DEFAULT_IMAGE_OUT_DIR.glob("*")
+            p for p in img_dir.glob("*")
             if p.is_file() and os.path.abspath(str(p)) not in referenced_images
-        ] if DEFAULT_IMAGE_OUT_DIR.is_dir() else []
+        ] if img_dir.is_dir() else []
 
         total = len(orphan_masks) + len(orphan_previews) + len(orphan_images)
         if total == 0:

@@ -51,7 +51,7 @@ import torch.optim as optim  # noqa: E402
 from torch.utils.data import DataLoader, Dataset  # noqa: E402
 
 from app.core.camera_intrinsics import project_points  # noqa: E402
-from app.core.paths import PROJECT_ROOT  # noqa: E402
+from app.core.settings_manager import pvnet_data_root  # noqa: E402
 from src.detection.pvnet.crop import (  # noqa: E402
     DEFAULT_BBOX_PADDING, DEFAULT_CROP_SIZE, crop_and_preprocess,
 )
@@ -59,7 +59,7 @@ from src.detection.pvnet.model import (  # noqa: E402
     PVNetHead, segmentation_loss, vertex_smooth_l1_loss,
 )
 
-DEFAULT_LABELS_PATH = PROJECT_ROOT / "data" / "pvnet_data" / "labels.json"
+DEFAULT_LABELS_PATH = pvnet_data_root() / "labels.json"
 DEFAULT_VAL_RATIO = 0.1
 DEFAULT_SEED = 0
 
