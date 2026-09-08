@@ -111,7 +111,7 @@ def load_pvnet_bundle(
     # 2026-09 버그 수정: 처음엔 config에 기록된 원본 경로(keypoints_3d_path)를
     # 먼저 읽고, 없을 때만 학습 폴더 안 스냅샷으로 폴백했다. 그런데
     # keypoints_3d_path는 "PVNet 라벨 생성" 탭이 CAD 파일명 기준 "고정
-    # 경로"(data/pvnet_keypoints_{cad_stem}.npy)에 저장한 걸 가리키는데, 이
+    # 경로"(data/pvnet_data/keypoints_{cad_stem}.npy)에 저장한 걸 가리키는데, 이
     # 경로는 학습 이후에도 그 탭에서 같은 CAD로 키포인트 설정(개수 등)을
     # 바꿔 다시 계산하면 내용이 덮어써진다 - 파일은 그대로 존재하니 원본
     # 우선 로직이 "이제는 다른 내용으로 바뀐" 파일을 조용히 읽어버렸다.

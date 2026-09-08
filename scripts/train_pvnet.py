@@ -1,6 +1,6 @@
 """PVNetHead 학습.
 
-data/pvnet_labels.json(라벨) + (필요시) 키포인트 3D .npy를 읽어서, 크롭
+data/pvnet_data/labels.json(라벨) + (필요시) 키포인트 3D .npy를 읽어서, 크롭
 시점에 벡터장/세그멘테이션 GT를 그때그때 계산하며 학습한다. generate_pvnet_labels.py
 docstring에서 이미 예고된 설계 그대로: "vertex field는 train_pvnet.py가 크롭
 시점에 계산한다" - 라벨 파일에는 가벼운 표현(keypoints_2d 또는 pose+intrinsics)만
@@ -20,7 +20,7 @@ keypoints_3d로 투영해서 만든다"는 우선순위로 처리한다 - 세 �
 실행 (프로젝트 루트에서):
     python scripts/train_pvnet.py \\
         --out-dir checkpoints/pvnet_bracket \\
-        --keypoints-3d data/pvnet_keypoints_bracket.npy
+        --keypoints-3d data/pvnet_data/keypoints_bracket.npy
 
 라벨에 keypoints_2d가 없는 항목이 하나도 없다면(=탭1/탭2에서만 라벨을 만들었다면)
 --keypoints-3d는 생략해도 된다.
@@ -59,7 +59,7 @@ from src.detection.pvnet.model import (  # noqa: E402
     PVNetHead, segmentation_loss, vertex_smooth_l1_loss,
 )
 
-DEFAULT_LABELS_PATH = PROJECT_ROOT / "data" / "pvnet_labels.json"
+DEFAULT_LABELS_PATH = PROJECT_ROOT / "data" / "pvnet_data" / "labels.json"
 DEFAULT_VAL_RATIO = 0.1
 DEFAULT_SEED = 0
 
@@ -95,7 +95,7 @@ def load_label_items(
     keypoints_3d: np.ndarray | None,
     min_fitness: float | None,
 ) -> list[LabelItem]:
-    """pvnet_labels.json -> 검증된 LabelItem 리스트.
+    """labels.json -> 검증된 LabelItem 리스트.
 
     항목별로 다음을 확인하고, 실패하면 이유를 출력한 뒤 건너뛴다(학습이
     조용히 절반의 데이터로 돌아가는 것을 막기 위해 스킵 사유를 전부 로그로 남김):
@@ -442,7 +442,7 @@ def train(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--labels", default=str(DEFAULT_LABELS_PATH), help="pvnet_labels.json 경로")
+    parser.add_argument("--labels", default=str(DEFAULT_LABELS_PATH), help="labels.json 경로")
     parser.add_argument(
         "--keypoints-3d", default=None,
         help="CAD 키포인트 3D .npy 경로. 라벨에 keypoints_2d가 없는 항목(예: "

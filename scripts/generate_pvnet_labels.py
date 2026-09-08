@@ -71,14 +71,15 @@ from src.detection.pvnet.keypoints import DEFAULT_NUM_SURFACE_KEYPOINTS, farthes
 
 # --- 하드코딩 상수 (CLI로 override 가능) ---
 DEFAULT_DATASET_ROOT = ROOT / "data" / "dataset"
-DEFAULT_MASK_OUT_DIR = ROOT / "data" / "pvnet_labels_masks"
-DEFAULT_LABELS_OUT = ROOT / "data" / "pvnet_labels.json"
-DEFAULT_KEYPOINTS_OUT_TEMPLATE = str(ROOT / "data" / "pvnet_keypoints_{cad_stem}.npy")
+DEFAULT_PVNET_DATA_ROOT = ROOT / "data" / "pvnet_data"
+DEFAULT_MASK_OUT_DIR = DEFAULT_PVNET_DATA_ROOT / "labels_masks"
+DEFAULT_LABELS_OUT = DEFAULT_PVNET_DATA_ROOT / "labels.json"
+DEFAULT_KEYPOINTS_OUT_TEMPLATE = str(DEFAULT_PVNET_DATA_ROOT / "keypoints_{cad_stem}.npy")
 DEFAULT_FITNESS_MIN = 0.85  # generate_rotation_labels.py와 동일 기준 - 학습 라벨은
                             # ICP 탭 기본 fitness_threshold보다 엄격하게 잡음.
 DEFAULT_SCORE_THRESHOLD = 0.5
 DEFAULT_DEVICE = "cuda:0"
-DEFAULT_PREVIEW_DIR = ROOT / "data" / "pvnet_labels_preview"
+DEFAULT_PREVIEW_DIR = DEFAULT_PVNET_DATA_ROOT / "labels_preview"
 DEFAULT_PREVIEW_MAX_WIDTH = 480
 
 
@@ -310,7 +311,7 @@ def main() -> None:
     parser.add_argument("--mask-out-dir", default=str(DEFAULT_MASK_OUT_DIR))
     parser.add_argument("--labels-out", default=str(DEFAULT_LABELS_OUT))
     parser.add_argument("--keypoints-out", default=None,
-                         help="미지정 시 CAD 파일명 기준으로 data/pvnet_keypoints_<cad_stem>.npy에 저장")
+                         help="미지정 시 CAD 파일명 기준으로 data/pvnet_data/keypoints_<cad_stem>.npy에 저장")
     parser.add_argument("--device", default=DEFAULT_DEVICE)
     parser.add_argument("--preview-dir", default=None,
                          help="지정하면 채택된 인스턴스마다 마스크+투영 키포인트 오버레이 이미지를 저장 (선택)")

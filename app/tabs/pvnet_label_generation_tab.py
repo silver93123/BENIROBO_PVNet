@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -67,15 +68,45 @@ from app.core.paths import PROJECT_ROOT
 from app.tabs.live_capture_icp_tab import LiveCaptureICPTab
 from src.detection.pvnet import farthest_point_sampling
 
-DEFAULT_MASK_OUT_DIR = PROJECT_ROOT / "data" / "pvnet_labels_masks"
-DEFAULT_IMAGE_OUT_DIR = PROJECT_ROOT / "data" / "pvnet_labels_images"
-DEFAULT_LABELS_OUT = PROJECT_ROOT / "data" / "pvnet_labels.json"
-DEFAULT_PREVIEW_DIR = PROJECT_ROOT / "data" / "pvnet_labels_preview"
-DEFAULT_KEYPOINTS_OUT_TEMPLATE = str(PROJECT_ROOT / "data" / "pvnet_keypoints_{cad_stem}.npy")
+DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "pvnet_data"
+DEFAULT_MASK_OUT_DIR = DEFAULT_DATA_ROOT / "labels_masks"
+DEFAULT_IMAGE_OUT_DIR = DEFAULT_DATA_ROOT / "labels_images"
+DEFAULT_LABELS_OUT = DEFAULT_DATA_ROOT / "labels.json"
+DEFAULT_PREVIEW_DIR = DEFAULT_DATA_ROOT / "labels_preview"
+DEFAULT_KEYPOINTS_OUT_TEMPLATE = str(DEFAULT_DATA_ROOT / "keypoints_{cad_stem}.npy")
 DEFAULT_LABEL_FITNESS_MIN = 0.85  # ICP 파라미터 박스의 fitness threshold(보통 0.6~0.7)보다
                                    # 엄격하게 - "정합 성공"과 "학습 라벨로 쓸 만큼 확실함"은 다른 기준.
 DEFAULT_NUM_KEYPOINTS = 8
 DEFAULT_PREVIEW_MAX_WIDTH = 480
+
+
+def atomic_write_json(path: Path, data) -> None:
+    """labels.json을 안전하게 덮어쓴다.
+
+    기존엔 open(path, "w") + json.dump()로 파일을 직접 덮어썼는데, 쓰는
+    도중(수백 건 누적된 상태에서) 프로세스가 죽거나 디스크가 꽉 차면 파일이
+    반쯤 써진 채로 남아 - 마스크(.npy)는 인스턴스별 개별 파일이라 하나가
+    깨져도 그 하나만 잃지만, 이 json은 전체 라벨이 한 파일에 묶여있어서
+    한 번의 쓰기 실패가 지금까지 쌓아온 라벨 전체를 못 읽게 만들 수 있다.
+
+    같은 디렉터리에 임시 파일로 먼저 다 쓴 뒤 os.replace()로 원자적으로
+    이름을 바꿔치기한다 - 중간에 실패해도 원본은 항상 직전의 정상 상태를
+    유지한다 (같은 디렉터리를 써야 os.replace가 원자적임이 보장됨 -
+    파일시스템이 다르면 rename이 copy+delete로 풀려 이 보장이 깨짐).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_name, path)  # 같은 파일시스템 내 rename은 원자적
+    except BaseException:
+        # 쓰다가 실패했으면 임시 파일만 지우고 원본은 그대로 둔다.
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+        raise
 
 
 class PVNetLabelGenerationTab(LiveCaptureICPTab):
@@ -445,9 +476,7 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
             )
             return
 
-        DEFAULT_LABELS_OUT.parent.mkdir(parents=True, exist_ok=True)
-        with open(DEFAULT_LABELS_OUT, "w", encoding="utf-8") as f:
-            json.dump(self._saved_labels, f, ensure_ascii=False, indent=2)
+        atomic_write_json(DEFAULT_LABELS_OUT, self._saved_labels)
 
         self.label_count_label.setText(f"누적 저장: {self._n_saved_session}건")
         self.log_message.emit(

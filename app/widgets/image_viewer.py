@@ -25,7 +25,7 @@ ROI_COLOR = (255, 179, 0)  # 앰버 - 마스크(초록/주황 계열)와 안 겹
 
 # 2026-09 추가: PVNet 라벨 미리보기 오버레이 ("라벨로 저장" 직후 마스크+
 # 키포인트를 CAD 오버레이처럼 화면에 바로 얹어서 보여줌 - 디스크의
-# pvnet_labels_preview/*.jpg를 따로 열어볼 필요가 없게). 마스크/센트로이드
+# labels_preview/*.jpg를 따로 열어볼 필요가 없게). 마스크/센트로이드
 # 색은 pvnet_label_generation_tab._save_preview_image()가 cv2(BGR)로 그리던
 # 것과 정확히 같은 색이 나오도록 RGB로 환산했다:
 #   마스크   cv2 BGR(60,220,60)  -> RGB(60,220,60)  (우연히 R=B라 값이 같음)
@@ -209,7 +209,7 @@ class ImageViewer(QLabel):
         지운다 - "CAD 오버레이"(set_pose_overlay)와 동일한 사용 패턴이다.
 
         pvnet_label_generation_tab.py의 "라벨로 저장" 직후 호출되어,
-        data/pvnet_labels_preview/*.jpg 파일을 따로 열어보지 않아도 이
+        data/pvnet_data/labels_preview/*.jpg 파일을 따로 열어보지 않아도 이
         화면에서 바로 결과를 확인할 수 있게 한다. keypoints_2d[0]은
         센트로이드로 취급해 다른 색/크기로 그린다 (farthest_point_sampling의
         include_centroid=True 관례와 동일).
@@ -273,7 +273,7 @@ class ImageViewer(QLabel):
             if mask_image is not None:
                 painter.drawImage(0, 0, mask_image)
 
-        # 1.5단계: PVNet 라벨 미리보기 마스크 (저장된 pvnet_labels_preview/*.jpg와
+        # 1.5단계: PVNet 라벨 미리보기 마스크 (저장된 labels_preview/*.jpg와
         # 같은 초록색 - "CAD 오버레이"처럼 독자적인 투명도 슬라이더로 조절됨.
         # 검출 마스크(1단계)와 별개 레이어라 둘 다 켜져 있으면 겹쳐 보인다.
         for overlay in self._label_preview_overlays.values():
@@ -317,7 +317,7 @@ class ImageViewer(QLabel):
 
         # 4단계: PVNet 라벨 미리보기 키포인트 (센트로이드=노랑, 나머지=하늘색).
         # 3단계 CAD 오버레이(속이 빈 원)와 구분되도록 "채워진" 원으로 그린다 -
-        # pvnet_labels_preview/*.jpg에 저장되는 cv2.circle(..., -1)과 같은 모양.
+        # labels_preview/*.jpg에 저장되는 cv2.circle(..., -1)과 같은 모양.
         painter.setPen(Qt.PenStyle.NoPen)
         centroid_color = QColor(*LABEL_PREVIEW_CENTROID_COLOR)
         centroid_color.setAlpha(self._label_preview_alpha)

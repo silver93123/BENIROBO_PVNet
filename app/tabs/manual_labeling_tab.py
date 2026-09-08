@@ -13,7 +13,7 @@ obj별 회전각(Rx/Ry/Rz)을 입력해서 라벨을 만드는 툴이다. LiveCa
        LiveLabelGenerationTab이 쓰는 것과 완전히 같은 파일/스키마, 이어서 누적됨)
     4) 원통형 대칭(cylindrical_*)이면 canonicalize_axial_rotation()으로 스핀 제거
     5) CAD 키포인트(FPS)를 그 회전+위치로 투영 -> keypoints_2d 라벨 저장
-       (PVNet용, data/pvnet_labels.json)
+       (PVNet용, data/labels.json)
 
 즉 한 번의 각도 입력으로 RotHead와 PVNet 라벨을 동시에 만든다.
 
@@ -45,6 +45,7 @@ from app.core import icp_runner
 from app.core.camera_intrinsics import estimate_intrinsics_from_organized_pcd, project_points
 from app.core.icp_runner import _Rx, _Ry, _Rz
 from app.core.paths import PROJECT_ROOT
+import app.tabs.pvnet_label_generation_tab as _pvnet_gen_tab
 from app.tabs.live_capture_icp_tab import LiveCaptureICPTab
 from src.detection.pvnet import canonicalize_axial_rotation, farthest_point_sampling
 
@@ -53,8 +54,11 @@ ROTMDET_TAB_NAME = "RTMDet"
 DEFAULT_MASK_OUT_DIR = PROJECT_ROOT / "data" / "rotation_labels_masks"       # RotHead와 동일 폴더 공유
 DEFAULT_IMAGE_OUT_DIR = PROJECT_ROOT / "data" / "rotation_labels_images"     # RotHead와 동일 폴더 공유
 DEFAULT_ROTATION_LABELS_OUT = PROJECT_ROOT / "data" / "rotation_labels.json"  # RotHead와 완전히 같은 파일
-DEFAULT_PVNET_LABELS_OUT = PROJECT_ROOT / "data" / "pvnet_labels.json"
-DEFAULT_KEYPOINTS_3D_OUT = PROJECT_ROOT / "data" / "pvnet_keypoints_3d.npy"
+# PVNet 라벨/키포인트 출력 경로는 pvnet_label_generation_tab.py의 상수를 그대로
+# 가져다 쓴다(단일 출처 유지 - 이 탭과 탭2가 서로 다른 경로를 보게 되는 사고
+# 방지. pvnet_label_manager_tab.py도 같은 원칙을 쓴다).
+DEFAULT_PVNET_LABELS_OUT = _pvnet_gen_tab.DEFAULT_LABELS_OUT
+DEFAULT_KEYPOINTS_3D_OUT = _pvnet_gen_tab.DEFAULT_DATA_ROOT / "keypoints_3d.npy"
 
 PVNET_NUM_KEYPOINTS = 8
 SYMMETRY_AXIS_CHOICES = ["none", "x", "y", "z"]
@@ -478,8 +482,7 @@ class ManualLabelingTab(LiveCaptureICPTab):
         DEFAULT_ROTATION_LABELS_OUT.parent.mkdir(parents=True, exist_ok=True)
         with open(DEFAULT_ROTATION_LABELS_OUT, "w", encoding="utf-8") as f:
             json.dump(self._rotation_labels, f, ensure_ascii=False, indent=2)
-        with open(DEFAULT_PVNET_LABELS_OUT, "w", encoding="utf-8") as f:
-            json.dump(self._pvnet_labels, f, ensure_ascii=False, indent=2)
+        _pvnet_gen_tab.atomic_write_json(DEFAULT_PVNET_LABELS_OUT, self._pvnet_labels)
 
         self.manual_count_label.setText(f"누적 저장: {self._n_saved_session}건")
         self.log_message.emit(
@@ -501,7 +504,7 @@ class ManualLabelingTab(LiveCaptureICPTab):
                 with open(DEFAULT_PVNET_LABELS_OUT, "r", encoding="utf-8") as f:
                     self._pvnet_labels = json.load(f)
             except (json.JSONDecodeError, OSError) as exc:
-                self.log_message.emit(f"[{self.LOG_PREFIX}] pvnet_labels.json 로드 실패 (무시): {exc}")
+                self.log_message.emit(f"[{self.LOG_PREFIX}] labels.json 로드 실패 (무시): {exc}")
 
         self._n_saved_session = len(self._pvnet_labels)
         if self._n_saved_session:

@@ -34,8 +34,8 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core.paths import PROJECT_ROOT
+from app.tabs.pvnet_label_generation_tab import DEFAULT_LABELS_OUT as DEFAULT_LABELS_PATH
 
-DEFAULT_LABELS_PATH = PROJECT_ROOT / "data" / "pvnet_labels.json"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "checkpoints" / "pvnet_run"
 TRAIN_SCRIPT = PROJECT_ROOT / "scripts" / "train_pvnet.py"
 

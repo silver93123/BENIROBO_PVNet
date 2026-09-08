@@ -1,11 +1,11 @@
 """탭: PVNet 라벨 파일 관리.
 
-data/pvnet_labels.json에 누적된 라벨을 미리보기 이미지(pvnet_labels_preview/
+data/pvnet_data/labels.json에 누적된 라벨을 미리보기 이미지(pvnet_labels_preview/
 *.jpg) + 키포인트 개수와 함께 목록으로 보여주고, 잘못 저장된 항목을 골라서
 지울 수 있게 한다.
 
 이 탭이 필요해진 배경: "PVNet 라벨 생성" 탭(pvnet_label_generation_tab.py)은
-CAD 파일명 기준 "고정 경로"(data/pvnet_keypoints_{cad_stem}.npy)에 키포인트
+CAD 파일명 기준 "고정 경로"(data/pvnet_data/keypoints_{cad_stem}.npy)에 키포인트
 3D를 저장한다. 같은 CAD로 키포인트 개수 등 설정을 바꿔서 다시 계산하면
 그 파일 내용이 그대로 덮어써진다 - 그 사이에 이미 저장해둔 라벨들은
 keypoints_2d 개수가 서로 달라질 수 있는데, 지금까지는 이걸 알아챌 방법이
@@ -14,14 +14,14 @@ keypoints_2d 개수가 서로 달라질 수 있는데, 지금까지는 이걸 �
 라벨을 자동으로 골라 선택하는 기능으로 이 문제를 미리 찾아낼 수 있게 한다.
 
 삭제 시 함께 정리하는 것 (라벨 하나 = 인스턴스 하나 기준):
-    - pvnet_labels.json에서 해당 항목 제거
-    - 그 항목의 마스크 .npy (data/pvnet_labels_masks/)
-    - 그 항목의 미리보기 .jpg (data/pvnet_labels_preview/)
-    - 원본 이미지 복사본(data/pvnet_labels_images/)은 "다른 라벨이 더 이상
+    - labels.json에서 해당 항목 제거
+    - 그 항목의 마스크 .npy (data/pvnet_data/labels_masks/)
+    - 그 항목의 미리보기 .jpg (data/pvnet_data/labels_preview/)
+    - 원본 이미지 복사본(data/pvnet_data/labels_images/)은 "다른 라벨이 더 이상
       참조하지 않을 때만" 같이 지운다 - 같은 프레임에서 검출된 여러
       인스턴스가 같은 이미지 파일을 공유하기 때문.
 
-"고아 파일 정리": pvnet_labels.json에는 더 이상 없는데 디스크에 남아있는
+"고아 파일 정리": labels.json에는 더 이상 없는데 디스크에 남아있는
 마스크/미리보기/이미지 파일(과거 크래시나 이 탭 도입 이전의 수동 편집으로
 생겼을 수 있는 것)을 찾아서 지운다.
 
@@ -45,9 +45,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from app.core.paths import PROJECT_ROOT
 from app.tabs.pvnet_label_generation_tab import (
-    DEFAULT_IMAGE_OUT_DIR, DEFAULT_LABELS_OUT, DEFAULT_MASK_OUT_DIR, DEFAULT_PREVIEW_DIR,
+    DEFAULT_DATA_ROOT, DEFAULT_IMAGE_OUT_DIR, DEFAULT_LABELS_OUT, DEFAULT_MASK_OUT_DIR,
+    DEFAULT_PREVIEW_DIR, atomic_write_json,
 )
 
 LABEL_LIST_WIDTH = 160
@@ -79,7 +79,7 @@ class PVNetLabelManagerTab(QWidget):
 
         btn_row = QHBoxLayout()
         btn_refresh = QPushButton("새로고침")
-        btn_refresh.setToolTip("디스크의 pvnet_labels.json을 다시 읽어옵니다.")
+        btn_refresh.setToolTip("디스크의 labels.json을 다시 읽어옵니다.")
         btn_refresh.clicked.connect(self._reload)
         btn_row.addWidget(btn_refresh)
 
@@ -108,7 +108,7 @@ class PVNetLabelManagerTab(QWidget):
 
         layout.addLayout(btn_row)
 
-        layout.addWidget(QLabel("키포인트 3D 파일 (data/pvnet_keypoints_*.npy)"))
+        layout.addWidget(QLabel("키포인트 3D 파일 (data/pvnet_data/keypoints_*.npy)"))
         self.keypoints_files_label = QLabel("")
         self.keypoints_files_label.setWordWrap(True)
         self.keypoints_files_label.setStyleSheet("color: #666; font-size: 11px;")
@@ -225,7 +225,7 @@ class PVNetLabelManagerTab(QWidget):
                 with open(DEFAULT_LABELS_OUT, "r", encoding="utf-8") as f:
                     self._labels = json.load(f)
             except (json.JSONDecodeError, OSError) as exc:
-                QMessageBox.critical(self, "로드 실패", f"pvnet_labels.json을 읽지 못했습니다:\n{exc}")
+                QMessageBox.critical(self, "로드 실패", f"labels.json을 읽지 못했습니다:\n{exc}")
                 self._labels = []
         else:
             self._labels = []
@@ -244,8 +244,7 @@ class PVNetLabelManagerTab(QWidget):
         self._rebuild_list()
 
     def _refresh_keypoints_files_info(self) -> None:
-        data_dir = PROJECT_ROOT / "data"
-        files = sorted(data_dir.glob("pvnet_keypoints_*.npy"))
+        files = sorted(DEFAULT_DATA_ROOT.glob("keypoints_*.npy")) if DEFAULT_DATA_ROOT.is_dir() else []
         if not files:
             self.keypoints_files_label.setText("(없음)")
             return
@@ -354,9 +353,7 @@ class PVNetLabelManagerTab(QWidget):
                 n_files_deleted += 1
 
         self._labels = remaining
-        DEFAULT_LABELS_OUT.parent.mkdir(parents=True, exist_ok=True)
-        with open(DEFAULT_LABELS_OUT, "w", encoding="utf-8") as f:
-            json.dump(self._labels, f, ensure_ascii=False, indent=2)
+        atomic_write_json(DEFAULT_LABELS_OUT, self._labels)
 
         self.log_message.emit(
             f"[{self.LOG_PREFIX}] {len(selected_idx)}건 삭제 (연관 파일 {n_files_deleted}개 포함), "
@@ -377,7 +374,7 @@ class PVNetLabelManagerTab(QWidget):
             raise
 
     def _on_cleanup_orphans_impl(self) -> None:
-        """pvnet_labels.json에 더 이상 없는데 디스크에 남아있는 마스크/
+        """labels.json에 더 이상 없는데 디스크에 남아있는 마스크/
         미리보기/이미지 파일을 찾아서 지운다. 경로 비교는 절대경로 기준 -
         라벨에 상대경로/절대경로가 섞여 저장돼 있어도 안전하게 비교하기 위함."""
         referenced_masks = {os.path.abspath(e["mask"]) for e in self._labels if e.get("mask")}
