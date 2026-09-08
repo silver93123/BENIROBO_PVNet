@@ -200,6 +200,10 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         self.thresh_slider.valueChanged.connect(
             lambda v: self.thresh_label.setText(f"{v / 100:.2f}")
         )
+        # 마우스로 슬라이더를 놓는 순간(드래그 도중 매 픽셀마다 X) '설정' 탭의
+        # score_threshold에 자동 저장 - 다음에 앱을 다시 켜도 이 값 그대로
+        # 시작한다. '설정' 탭에서 [저장]을 따로 누를 필요가 없다.
+        self.thresh_slider.sliderReleased.connect(self._on_thresh_slider_committed)
         run_row.addWidget(self.thresh_slider)
         run_row.addWidget(self.thresh_label)
 
@@ -216,6 +220,7 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         self.fitness_slider.valueChanged.connect(
             lambda v: self.fitness_label.setText(f"{v / 100:.2f}")
         )
+        self.fitness_slider.sliderReleased.connect(self._on_fitness_slider_committed)
         run_row.addWidget(self.fitness_slider)
         run_row.addWidget(self.fitness_label)
         run_row.addStretch(1)
@@ -811,6 +816,16 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         pvnet_label_generation_tab.py)만 오버라이드해서, 이미 계산해둔
         캐시(예: '라벨 생성' 미리보기 결과)를 무효화하면 된다."""
         pass
+
+    def _on_thresh_slider_committed(self) -> None:
+        value = self.thresh_slider.value() / 100.0
+        settings_manager.save_settings({"score_threshold": value})
+        self.log_message.emit(f"[{self.LOG_PREFIX}] conf 임계값 저장됨: {value:.2f} (다음 실행에도 유지)")
+
+    def _on_fitness_slider_committed(self) -> None:
+        value = self.fitness_slider.value() / 100.0
+        settings_manager.save_settings({"fitness_threshold": value})
+        self.log_message.emit(f"[{self.LOG_PREFIX}] ICP fitness 임계값 저장됨: {value:.2f} (다음 실행에도 유지)")
 
     def _build_pose_edit_row(self, instance_id: int) -> QWidget:
         """ICP 결과의 위치(mm)/회전(deg)을 "델타 보정량"이 아니라 현재 값을

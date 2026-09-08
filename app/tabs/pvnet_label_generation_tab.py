@@ -157,15 +157,18 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
 
         layout.addWidget(QLabel("PVNet 키포인트 설정"))
 
+        _saved = settings_manager.load_settings()
+
         kpts_num_row = QHBoxLayout()
         kpts_num_row.addWidget(QLabel("키포인트 개수(센트로이드 제외)"))
         self.num_keypoints_spin = QSpinBox()
         self.num_keypoints_spin.setRange(4, 32)
-        self.num_keypoints_spin.setValue(DEFAULT_NUM_KEYPOINTS)
+        self.num_keypoints_spin.setValue(_saved.get("pvnet_num_keypoints", DEFAULT_NUM_KEYPOINTS))
         self.num_keypoints_spin.setToolTip(
             "PVNetHead.num_keypoints와 반드시 일치해야 합니다.\n"
             "CAD를 바꾸거나 이 값을 바꾸면 키포인트가 다시 계산됩니다."
         )
+        self.num_keypoints_spin.editingFinished.connect(self._on_num_keypoints_committed)
         kpts_num_row.addWidget(self.num_keypoints_spin)
         layout.addLayout(kpts_num_row)
 
@@ -185,11 +188,14 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
         self.spin_label_fitness_min = QDoubleSpinBox()
         self.spin_label_fitness_min.setRange(0.0, 1.0)
         self.spin_label_fitness_min.setSingleStep(0.01)
-        self.spin_label_fitness_min.setValue(DEFAULT_LABEL_FITNESS_MIN)
+        self.spin_label_fitness_min.setValue(
+            _saved.get("pvnet_label_fitness_min", DEFAULT_LABEL_FITNESS_MIN)
+        )
         self.spin_label_fitness_min.setToolTip(
             "위 'ICP 파라미터' 박스의 fitness threshold(정합 성공/실패 판정)와는\n"
             "별개입니다. 여기 지정한 값 이상인 인스턴스만 학습 라벨로 저장됩니다."
         )
+        self.spin_label_fitness_min.editingFinished.connect(self._on_label_fitness_min_committed)
         fitness_row.addWidget(self.spin_label_fitness_min)
         layout.addLayout(fitness_row)
 
@@ -230,6 +236,21 @@ class PVNetLabelGenerationTab(LiveCaptureICPTab):
         if path:
             self.keypoints_out_edit.setText(path)
             self._keypoints_3d_cad_path = None  # 경로 바뀌면 다음 저장 때 재계산/재저장
+
+    def _on_num_keypoints_committed(self) -> None:
+        """스핀박스 편집이 끝나는 시점(포커스 아웃/Enter)마다 '설정'에 자동
+        저장 - 다음에 앱을 다시 켜도 이 값 그대로 시작한다."""
+        settings_manager.save_settings({"pvnet_num_keypoints": self.num_keypoints_spin.value()})
+        self.log_message.emit(
+            f"[{self.LOG_PREFIX}] 키포인트 개수 저장됨: {self.num_keypoints_spin.value()} (다음 실행에도 유지)"
+        )
+
+    def _on_label_fitness_min_committed(self) -> None:
+        settings_manager.save_settings({"pvnet_label_fitness_min": self.spin_label_fitness_min.value()})
+        self.log_message.emit(
+            f"[{self.LOG_PREFIX}] 라벨 채택 fitness 저장됨: "
+            f"{self.spin_label_fitness_min.value():.2f} (다음 실행에도 유지)"
+        )
 
     # ----------------------------------------------------- 프레임/ICP 훅
     def _on_new_frame_acquired(self, frame_label: str) -> None:

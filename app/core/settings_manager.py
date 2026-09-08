@@ -51,6 +51,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # pvnet_data_root() 헬퍼가 이 규칙을 그대로 구현한다.
     "pvnet_data_root": "",
 
+    # --- PVNet 라벨 생성 탭의 세션별 조정값도 여기 저장해서 재시작해도 유지
+    # (2. PVNet 라벨 생성 탭에서 스핀박스를 조정할 때마다 자동 저장됨 -
+    # '설정' 탭에서 [저장]을 따로 안 눌러도 됨) ---
+    "pvnet_num_keypoints": 8,
+    "pvnet_label_fitness_min": 0.85,
+
     # --- ICP 공통 (등록 알고리즘 무관) ---
     "use_visible_face_filtering": True,
     "mask_erode_px": 1,
