@@ -887,6 +887,16 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
         btn_reset.setToolTip("이 인스턴스의 위치/회전을 ICP가 처음 낸 값으로 되돌립니다.")
         layout.addWidget(btn_reset)
 
+        btn_view3d = QPushButton("3D 보기 (이 obj만)")
+        btn_view3d.setToolTip(
+            "이 인스턴스의 마스킹된 포인트클라우드와 CAD 정합 결과만 따로 열어서\n"
+            "봅니다 - 배경/다른 obj는 안 섞여 나오니 수동으로 위치/회전을\n"
+            "조정할 때 이 obj만 집중해서 볼 수 있습니다. 위 스핀박스를 바꾼\n"
+            "직후에 다시 누르면 바뀐 자세가 바로 반영돼서 보입니다."
+        )
+        btn_view3d.clicked.connect(lambda: self._on_open_viewer_for_instance(instance_id))
+        layout.addWidget(btn_view3d)
+
         all_spins = list(pos_spins.values()) + list(rot_spins.values())
 
         # 2026-09 변경: 회전 3칸을 매번 "절대 오일러 3개 재조합"으로 적용하면
@@ -1086,3 +1096,31 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
             return
 
         self._launch_viewer(components, title=f"ICP 결과 - {self._current_frame}", dir_tag=self._current_frame or "frame")
+
+    def _on_open_viewer_for_instance(self, instance_id: int) -> None:
+        """obj 카드의 '3D 보기 (이 obj만)' 버튼 - 이 인스턴스의 마스킹된
+        포인트클라우드 + CAD 정합 결과만 따로 뷰어로 연다 (배경/다른 obj는
+        제외). 라벨링하기 애매한 obj를 골라 수동으로 pose를 미세조정할 때,
+        전체 씬을 다시 안 열어도 이 obj 하나에 집중해서 볼 수 있다.
+
+        스핀박스로 pose를 바꾼 직후 다시 누르면, self._last_icp_results 안의
+        해당 result.T가 이미 갱신돼 있으므로(_apply_position_edit /
+        _apply_incremental_rotation이 바로 반영) 바뀐 자세가 그대로 보인다."""
+        if self._cad_pcd is None:
+            QMessageBox.information(self, "알림", "CAD가 아직 로드되지 않았습니다.")
+            return
+        result = next((r for r in self._last_icp_results if r.instance_id == instance_id), None)
+        if result is None or not result.ok:
+            QMessageBox.information(self, "알림", "이 인스턴스는 ICP 결과가 없어 3D로 볼 수 없습니다.")
+            return
+
+        components = icp_runner.build_single_instance_components(result, self._cad_pcd)
+        if not components:
+            QMessageBox.information(self, "알림", "표시할 포인트클라우드가 없습니다.")
+            return
+
+        self._launch_viewer(
+            components,
+            title=f"ICP 결과 - obj{instance_id} - {self._current_frame}",
+            dir_tag=f"{self._current_frame or 'frame'}_obj{instance_id}",
+        )

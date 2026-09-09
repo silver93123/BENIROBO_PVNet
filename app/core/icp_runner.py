@@ -1163,6 +1163,46 @@ def build_scene_components(
     return components
 
 
+def build_single_instance_components(
+    result: ICPResult, cad_pcd,
+) -> dict[str, o3d.geometry.PointCloud]:
+    """단일 인스턴스의 3D 뷰어 레이어만 만든다 (라벨 수동 정밀 조정용).
+
+    build_scene_components()는 프레임 전체를 한 뷰어에 넣으려고 같은 종류의
+    레이어(예: "ICP Instance", "CAD Registration Result")를 인스턴스 전체에
+    걸쳐 하나로 합쳐버린다 - 여러 obj를 한눈에 보기엔 좋지만, 특정 obj 하나의
+    마스크/CAD 정합만 따로 떼어서 자세히 보고 싶을 땐 다른 obj가 다 섞여
+    나와서 방해가 된다. 이 함수는 같은 레이어 이름 관례(색상 포함)를 그대로
+    쓰되, 주어진 result 하나에 대해서만 만든다 - 배경은 넣지 않는다(정밀
+    조정 목적상 이 obj의 포인트와 CAD만 보면 충분).
+    """
+    components: dict[str, o3d.geometry.PointCloud] = {}
+    if not result.ok or result.scene_pcd is None or result.T is None:
+        return components
+
+    if result.raw_scene_pcd is not None and len(result.raw_scene_pcd.points) > 0:
+        rv = copy.deepcopy(result.raw_scene_pcd)
+        rv.colors = o3d.utility.Vector3dVector(np.tile(_RAW_MASK_COLOR, (len(rv.points), 1)))
+        components["RTMDet Detection Mask (Before Outlier Removal)"] = rv
+
+    sv = copy.deepcopy(result.scene_pcd)
+    sv.colors = o3d.utility.Vector3dVector(np.tile(_INSTANCE_COLOR, (len(sv.points), 1)))
+    components["ICP Instance (After Outlier Removal)"] = sv
+
+    cv = copy.deepcopy(cad_pcd)
+    cv.transform(result.T)
+    cv.colors = o3d.utility.Vector3dVector(np.tile(_CAD_COLOR, (len(cv.points), 1)))
+    components["CAD Registration Result"] = cv
+
+    if result.pick_point_mm is not None:
+        sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.006)
+        sphere.translate(np.array(result.pick_point_mm) / 1000.0)
+        sphere.paint_uniform_color(_PICK_COLOR.tolist())
+        components["Pick Point"] = sphere.sample_points_uniformly(400)
+
+    return components
+
+
 def build_scene_geometry(results: list[ICPResult], cad_pcd,
                           background_pcd: o3d.geometry.PointCloud | None = None) -> o3d.geometry.PointCloud:
     """(하위호환용) build_scene_components()의 레이어를 전부 하나로 합쳐서 반환.
