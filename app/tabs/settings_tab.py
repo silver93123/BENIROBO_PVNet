@@ -17,8 +17,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
+    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -53,6 +54,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_detection_group())
         layout.addWidget(self._build_camera_group())
         layout.addWidget(self._build_pvnet_data_group())
+        layout.addWidget(self._build_viz_color_group())
         layout.addWidget(self._build_icp_params_box())
         self.fgr_box = self._build_fgr_params_box()
         layout.addWidget(self.fgr_box)
@@ -188,6 +190,80 @@ class SettingsTab(QWidget):
         )
         if path:
             self.pvnet_data_root_edit.setText(path)
+
+    # ------------------------------------------------------- 3D 뷰어 색상
+    def _build_viz_color_group(self) -> QGroupBox:
+        """3D 뷰어(icp_viewer.py)의 레이어별 표시 색상. RTMDet 마스크 원본/ICP
+        인스턴스/배경은 실제 촬영 intensity로 색칠되는 게 기본이라, 여기
+        지정한 색은 intensity를 못 구했을 때의 폴백으로만 쓰인다. CAD/픽포인트/
+        ICP 실패 인스턴스는 실측 데이터가 아니므로(CAD=합성모델, 픽포인트=마커,
+        실패=신호) 항상 여기 지정한 색 그대로 쓰인다."""
+        group = QGroupBox("3D 뷰어 표시 색상")
+        layout = QVBoxLayout(group)
+
+        hint = QLabel(
+            "RTMDet 마스크 원본 / ICP 인스턴스 / 배경은 촬영 intensity가 있으면 그걸로\n"
+            "색칠되고, 없을 때만 아래 색으로 대체됩니다. CAD / 픽포인트 / ICP 실패는\n"
+            "항상 아래 색 그대로 표시됩니다."
+        )
+        hint.setStyleSheet("color: #888; font-size: 10px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self._viz_color_swatches: dict[str, QLabel] = {}
+        self._viz_color_edits: dict[str, QLineEdit] = {}
+
+        rows = [
+            ("raw_mask", "RTMDet 마스크 원본 (intensity 없을 때만)"),
+            ("instance", "ICP 인스턴스 (intensity 없을 때만)"),
+            ("cad", "CAD 정합 결과"),
+            ("pick", "픽포인트"),
+            ("failed", "ICP 실패 인스턴스"),
+        ]
+        for key, label_text in rows:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label_text), stretch=1)
+
+            swatch = QLabel()
+            swatch.setFixedSize(24, 18)
+            swatch.setStyleSheet("border: 1px solid #999;")
+            self._viz_color_swatches[key] = swatch
+            row.addWidget(swatch)
+
+            edit = QLineEdit()
+            edit.setFixedWidth(80)
+            edit.setPlaceholderText("#RRGGBB")
+            edit.editingFinished.connect(lambda k=key: self._on_viz_color_hex_edited(k))
+            self._viz_color_edits[key] = edit
+            row.addWidget(edit)
+
+            btn = QPushButton("색상 선택...")
+            btn.clicked.connect(lambda checked=False, k=key: self._on_pick_viz_color(k))
+            row.addWidget(btn)
+
+            layout.addLayout(row)
+
+        return group
+
+    def _on_pick_viz_color(self, key: str) -> None:
+        current_hex = self._viz_color_edits[key].text().strip() or settings_manager.DEFAULT_SETTINGS[f"viz_color_{key}"]
+        initial = QColor(current_hex)
+        color = QColorDialog.getColor(initial, self, "색상 선택")
+        if color.isValid():
+            self._set_viz_color(key, color.name().upper())
+
+    def _on_viz_color_hex_edited(self, key: str) -> None:
+        text = self._viz_color_edits[key].text().strip()
+        color = QColor(text)
+        if not color.isValid():
+            # 잘못된 값을 입력했으면 조용히 무시하지 않고 스와치만 그대로
+            # 둬서 "반영 안 됐다"는 걸 눈으로 알 수 있게 한다.
+            return
+        self._set_viz_color(key, color.name().upper())
+
+    def _set_viz_color(self, key: str, hex_color: str) -> None:
+        self._viz_color_edits[key].setText(hex_color)
+        self._viz_color_swatches[key].setStyleSheet(f"background-color: {hex_color}; border: 1px solid #999;")
 
     # ----------------------------------------------------------------- 카메라
     def _build_camera_group(self) -> QGroupBox:
@@ -562,6 +638,11 @@ class SettingsTab(QWidget):
             "config_path": self.config_edit.text().strip(),
             "score_threshold": self.spin_score_threshold.value(),
             "pvnet_data_root": self.pvnet_data_root_edit.text().strip(),
+            "viz_color_raw_mask": self._viz_color_edits["raw_mask"].text().strip() or settings_manager.DEFAULT_SETTINGS["viz_color_raw_mask"],
+            "viz_color_instance": self._viz_color_edits["instance"].text().strip() or settings_manager.DEFAULT_SETTINGS["viz_color_instance"],
+            "viz_color_cad": self._viz_color_edits["cad"].text().strip() or settings_manager.DEFAULT_SETTINGS["viz_color_cad"],
+            "viz_color_pick": self._viz_color_edits["pick"].text().strip() or settings_manager.DEFAULT_SETTINGS["viz_color_pick"],
+            "viz_color_failed": self._viz_color_edits["failed"].text().strip() or settings_manager.DEFAULT_SETTINGS["viz_color_failed"],
             "camera_type": self.camera_type_combo.currentText(),
             "averaging_num_frames": self.spin_avg_frames.value(),
             "averaging_min_valid_ratio": self.spin_min_valid_ratio.value(),
@@ -594,6 +675,9 @@ class SettingsTab(QWidget):
         self.config_edit.setText(settings["config_path"])
         self.spin_score_threshold.setValue(settings["score_threshold"])
         self.pvnet_data_root_edit.setText(settings.get("pvnet_data_root", ""))
+        for key in ("raw_mask", "instance", "cad", "pick", "failed"):
+            hex_color = settings.get(f"viz_color_{key}", settings_manager.DEFAULT_SETTINGS[f"viz_color_{key}"])
+            self._set_viz_color(key, hex_color)
         idx = self.camera_type_combo.findText(settings["camera_type"])
         self.camera_type_combo.setCurrentIndex(max(0, idx))
         self.spin_avg_frames.setValue(settings["averaging_num_frames"])

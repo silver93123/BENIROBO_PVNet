@@ -57,6 +57,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "pvnet_num_keypoints": 8,
     "pvnet_label_fitness_min": 0.85,
 
+    # --- 3D 뷰어 표시 색상 ('설정' 탭에서 관리, hex 문자열 "#RRGGBB") ---
+    # intensity로 색칠되는 레이어(RTMDet 마스크 원본/ICP 인스턴스/배경)는
+    # intensity를 못 구했을 때만 이 색으로 폴백한다. CAD/픽포인트/실패
+    # 인스턴스는 애초에 실측 데이터가 아니라(CAD는 합성, 픽포인트는 마커,
+    # 실패는 "실패했다"는 신호 자체가 중요) 항상 이 색 그대로 쓴다.
+    "viz_color_raw_mask": "#FF8C00",   # RTMDet 마스크 원본(outlier 제거 전) - 주황
+    "viz_color_instance": "#E62619",   # ICP 인스턴스(outlier 제거 후) - 빨강
+    "viz_color_cad": "#26D941",        # CAD 정합 결과 - 초록
+    "viz_color_pick": "#FFE60D",       # 픽포인트 - 노랑
+    "viz_color_failed": "#8C0D66",     # ICP 실패 인스턴스 - 자주
+
     # --- ICP 공통 (등록 알고리즘 무관) ---
     "use_visible_face_filtering": True,
     "mask_erode_px": 1,
@@ -150,6 +161,41 @@ def save_settings(settings: dict[str, Any]) -> None:
 def icp_params_kwargs(settings: dict[str, Any]) -> dict[str, Any]:
     """settings dict -> ICPParams(**kwargs)에 바로 넣을 수 있는 부분집합."""
     return {key: settings[key] for key in _ICP_PARAM_KEYS if key in settings}
+
+
+_VIZ_COLOR_KEYS = {
+    "raw_mask": "viz_color_raw_mask",
+    "instance": "viz_color_instance",
+    "cad": "viz_color_cad",
+    "pick": "viz_color_pick",
+    "failed": "viz_color_failed",
+}
+
+
+def hex_to_rgb01(hex_color: str) -> tuple[float, float, float]:
+    """"#RRGGBB" -> (r,g,b) 0~1 float. 파싱 실패 시 회색(0.5,0.5,0.5)으로
+    안전하게 폴백한다 (설정 파일을 손으로 잘못 편집했을 때 3D 뷰어 전체가
+    죽는 것보다 낫다)."""
+    try:
+        h = hex_color.lstrip("#")
+        return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0)
+    except (ValueError, IndexError):
+        return (0.5, 0.5, 0.5)
+
+
+def rgb01_to_hex(rgb: tuple[float, float, float]) -> str:
+    r, g, b = (max(0, min(255, round(c * 255))) for c in rgb)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def get_viz_color(name: str) -> tuple[float, float, float]:
+    """3D 뷰어 레이어 색상을 '설정'에서 읽는다. name은 _VIZ_COLOR_KEYS의 키
+    중 하나("raw_mask"/"instance"/"cad"/"pick"/"failed"). icp_runner.py의
+    build_scene_components() 등이 매번 새로 호출해서 쓰므로, '설정' 탭에서
+    방금 바꾼 색이 다음 '3D 뷰어 열기' 클릭부터 바로 반영된다."""
+    key = _VIZ_COLOR_KEYS[name]
+    hex_color = load_settings().get(key, DEFAULT_SETTINGS[key])
+    return hex_to_rgb01(hex_color)
 
 
 def pvnet_data_root() -> Path:

@@ -19,14 +19,18 @@ confidence-weighted ICP)만 이걸 override하면 된다.
 """
 from __future__ import annotations
 
+import logging
 from typing import List
 
+import cv2
 from PyQt6.QtWidgets import QWidget
 
 from app.core import icp_runner
 from app.core.detector import Detection
 from app.core.icp_runner import ICPParams, ICPResult
 from app.core.pipeline_context import FrameContext
+
+logger = logging.getLogger(__name__)
 
 
 class ICPPipelineTab(QWidget):
@@ -46,11 +50,35 @@ class ICPPipelineTab(QWidget):
     ) -> List[ICPResult]:
         """기본 구현 - 대부분의 파이프라인은 오버라이드 안 해도 된다."""
         results: List[ICPResult] = []
+
+        # 2026-09 추가: 3D 뷰어에서 인스턴스 포인트클라우드를 flat color 대신
+        # 실제 촬영 intensity로 색칠하기 위해, 프레임당 한 번만 intensity
+        # 이미지를 읽어둔다. 업샘플링(pc_upsample_factor>1)을 쓰면 보간으로
+        # 새로 생긴 점에는 대응하는 원본 픽셀이 없어 intensity를 정의할 수
+        # 없으므로, 그 경우엔 아예 안 읽고 아래에서 기존 flat color로
+        # 자연스럽게 폴백한다. 읽기 실패(파일 없음 등)도 조용히 None으로
+        # 남겨 ICP 자체에는 영향이 없게 한다 - 색칠은 부가 기능이라 실패해도
+        # 정합 결과 자체를 막으면 안 된다.
+        intensity_img = None
+        if params.pc_upsample_factor <= 1 and ctx.image_path:
+            intensity_img = cv2.imread(ctx.image_path, cv2.IMREAD_GRAYSCALE)
+            if intensity_img is None:
+                logger.warning(
+                    "intensity 이미지 로드 실패 (포인트클라우드는 flat color로 표시됨): %s",
+                    ctx.image_path,
+                )
+
         for i, det in enumerate(detections):
+            intensity_at_pts = None
             if params.pc_upsample_method == "probabilistic" and params.pc_upsample_factor > 1:
                 pts_mm = icp_runner.extract_instance_points_probabilistic(
                     det.mask, ctx.pcd_organized_mm, ctx.pcd_std_mm, ctx.valid_mask,
                     erode_px=params.mask_erode_px, samples_per_point=params.pc_upsample_factor,
+                )
+            elif intensity_img is not None:
+                pts_mm, intensity_at_pts = icp_runner.extract_instance_points_with_intensity_mm(
+                    det.mask, ctx.pcd_organized_mm, intensity_img, ctx.valid_mask,
+                    erode_px=params.mask_erode_px,
                 )
             else:
                 pts_mm = icp_runner.extract_instance_points_mm(
@@ -60,6 +88,7 @@ class ICPPipelineTab(QWidget):
             result = icp_runner.run_icp_for_instance(
                 i, pts_mm, ctx.cad_pcd, ctx.cad_visible_normal, ctx.cad_visible_flipped,
                 params=params, T_init_override=getattr(det, "initial_pose", None),
+                intensity_at_pts=intensity_at_pts,
             )
             results.append(result)
         return results

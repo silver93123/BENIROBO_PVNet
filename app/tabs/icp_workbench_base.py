@@ -30,6 +30,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import cv2
 from PyQt6.QtCore import pyqtSignal, Qt, QProcess, QEvent
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
@@ -1082,9 +1083,15 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
                     exclude_mask |= det.mask.astype(bool)
         background_pcd = None
         if self._pcd_organized is not None and self._valid_mask is not None:
+            # 2026-09 변경: 배경도 기본으로 실제 촬영 intensity로 색칠한다
+            # (예전엔 Z높이 컬러맵). self._current_image_path가 곧 RTMDet
+            # 검출에 쓴 그 intensity 이미지라 격자가 그대로 일치한다.
+            bg_intensity = None
+            if self._current_image_path:
+                bg_intensity = cv2.imread(self._current_image_path, cv2.IMREAD_GRAYSCALE)
             background_pcd = icp_runner.build_background_pcd(
                 self._pcd_organized, self._valid_mask, exclude_mask=exclude_mask,
-                color_mode="height",
+                color_mode="intensity", intensity=bg_intensity,
             )
 
         # 2026-07 개편: 레이어를 하나로 합치지 않고 이름별로 분리해서 각각
@@ -1099,9 +1106,10 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
 
     def _on_open_viewer_for_instance(self, instance_id: int) -> None:
         """obj 카드의 '3D 보기 (이 obj만)' 버튼 - 이 인스턴스의 마스킹된
-        포인트클라우드 + CAD 정합 결과만 따로 뷰어로 연다 (배경/다른 obj는
-        제외). 라벨링하기 애매한 obj를 골라 수동으로 pose를 미세조정할 때,
-        전체 씬을 다시 안 열어도 이 obj 하나에 집중해서 볼 수 있다.
+        포인트클라우드 + bbox 주변 배경 맥락 + CAD 정합 결과만 따로 뷰어로
+        연다 (다른 obj는 제외). 라벨링하기 애매한 obj를 골라 수동으로 pose를
+        미세조정할 때, 전체 씬을 다시 안 열어도 이 obj 하나에 집중해서 볼 수
+        있다.
 
         스핀박스로 pose를 바꾼 직후 다시 누르면, self._last_icp_results 안의
         해당 result.T가 이미 갱신돼 있으므로(_apply_position_edit /
@@ -1114,7 +1122,30 @@ class ICPWorkbenchTab(Viewer3DMixin, QWidget):
             QMessageBox.information(self, "알림", "이 인스턴스는 ICP 결과가 없어 3D로 볼 수 없습니다.")
             return
 
-        components = icp_runner.build_single_instance_components(result, self._cad_pcd)
+        # 2026-09 추가: 마스킹된 포인트만 보여주면 이 물체가 씬의 어디에,
+        # 어떤 배경(캘리브레이션 보드 등) 위에 놓여 있었는지 알 수 없다 -
+        # 2D 라벨 화면의 bbox 박스에 대응하는 정도의 주변 맥락을 3D에서도
+        # 보여준다. det가 없거나(인덱스 어긋남 등) bbox가 없으면 조용히
+        # 생략하고 예전처럼 마스크만 보여준다 - 부가 기능이라 실패해도 3D
+        # 보기 자체를 막으면 안 된다.
+        bbox_context_pcd = None
+        det = (
+            self._last_detections[instance_id]
+            if 0 <= instance_id < len(self._last_detections) else None
+        )
+        if det is not None and getattr(det, "bbox", None) is not None \
+                and self._pcd_organized is not None and self._valid_mask is not None:
+            intensity_img = None
+            if self._current_image_path:
+                intensity_img = cv2.imread(self._current_image_path, cv2.IMREAD_GRAYSCALE)
+            bbox_context_pcd = icp_runner.build_bbox_context_pcd(
+                self._pcd_organized, self._valid_mask, det.bbox,
+                exclude_mask=det.mask, intensity=intensity_img,
+            )
+
+        components = icp_runner.build_single_instance_components(
+            result, self._cad_pcd, bbox_context_pcd=bbox_context_pcd,
+        )
         if not components:
             QMessageBox.information(self, "알림", "표시할 포인트클라우드가 없습니다.")
             return
